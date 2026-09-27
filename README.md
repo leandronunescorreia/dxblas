@@ -10,9 +10,38 @@ The goals are:
   `D3D11_CREATE_DEVICE_*`, `D3D_FEATURE_LEVEL`, `HRESULT`, etc.).
 - A backend interface separates the public API from the graphics API.
 - Each backend implementation encapsulates platform-specific types using the PImpl idiom.
-- Shaders are cached per-format so compilation only occurs once on demand.
+- Shaders are cached per operation and format so compilation only occurs once on demand.
 - Native 1D GPU buffers (`ID3D11Buffer`) instead of 2D textures.
 - The first example is intentionally small and debug-friendly.
+
+## Project Structure
+
+```text
+dxblas/
+├── CMakeLists.txt                  # Build configuration (C++17, D3D11, DXGI, D3DCompiler)
+├── cmake/                          # CMake modules & future backend configuration
+│   └── README.md
+├── include/
+│   └── dxblas/
+│       ├── backend.hpp             # Abstract IBackend interface (initialize, sum, mul)
+│       └── dxblas.hpp              # Public Context API and native interop helpers
+├── src/
+│   ├── dxblas.cpp                  # Context implementation (owns std::unique_ptr<IBackend>)
+│   ├── d3d11_backend.cpp           # Direct3D 11 compute pipeline implementation (PImpl)
+│   └── backend/
+│       └── d3d11_backend.hpp       # Internal D3D11Backend declaration
+└── examples/
+    └── step_by_step.cpp            # Example demonstrating sum, mul, and native handle access
+```
+
+### Component Breakdown
+
+- **`include/dxblas/backend.hpp`**: Defines the abstract `IBackend` interface with `initialize()`, `sum()`, and `mul()`. Decouples linear algebra algorithms from specific graphics APIs.
+- **`include/dxblas/dxblas.hpp`**: Public library facade. Declares `dxblas::Context`, which manages backend lifetime via `std::unique_ptr<IBackend>`, and provides native handle queries (`get_native_d3d11`).
+- **`src/dxblas.cpp`**: Implements `Context`, forwarding BLAS operations directly to the active backend.
+- **`src/backend/d3d11_backend.hpp`**: Internal declaration of `D3D11Backend`, utilizing PImpl to prevent leaking `<d3d11.h>` into public headers.
+- **`src/d3d11_backend.cpp`**: Full Direct3D 11 compute pipeline. Implements device creation with automatic debug-layer fallback, 1D buffer allocation, subresource upload, runtime HLSL compilation with shader caching, dispatch, and staging readback.
+- **`examples/step_by_step.cpp`**: Educational sample verifying element-wise vector addition (`sum`) and multiplication (`mul`) on `uint32` and `float` data.
 
 ## Baby steps
 
@@ -22,7 +51,7 @@ The D3D11 backend is intentionally organized as:
 step_one_creating_the_device()
 step_two_creating_the_buffer()
 step_three_uploading_the_buffer()
-step_four_compiling_the_shader()   <-- cached per-format
+step_four_compiling_the_shader()   <-- cached per (op, format)
 step_five_dispatching_the_shader()
 step_six_reading_back_the_buffer()
 ```
@@ -77,7 +106,7 @@ IBackend
   +-- MetalBackend (PImpl)
 ```
 
-## build
+## Build & Run
 
 ```powershell
 Remove-Item -Recurse -Force build
