@@ -19,6 +19,13 @@ public:
         const void* b,
         void* out,
         std::size_t count) = 0;
+
+    virtual HRESULT mul(
+        DXGI_FORMAT format,
+        const void* a,
+        const void* b,
+        void* out,
+        std::size_t count) = 0;
 };
 
 } // namespace dxblas

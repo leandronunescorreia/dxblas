@@ -46,6 +46,25 @@ int main()
         std::cout << a[i] << " + " << b[i]
                   << " = " << out[i] << '\n';
 
+    // Element-wise multiplication
+    std::vector<std::uint32_t> mul_out(a.size());
+    hr = context.mul(
+        DXGI_FORMAT_R32_UINT,
+        a.data(),
+        b.data(),
+        mul_out.data(),
+        mul_out.size());
+
+    if (FAILED(hr)) {
+        print_hresult("mul (uint32)", hr);
+        return 3;
+    }
+
+    std::cout << "Uint32 mul:\n";
+    for (std::size_t i = 0; i < mul_out.size(); ++i)
+        std::cout << a[i] << " * " << b[i]
+                  << " = " << mul_out[i] << '\n';
+
     // Verify float computation and shader caching
     std::vector<float> fa{1.5f, 2.5f, 3.5f};
     std::vector<float> fb{10.0f, 20.0f, 30.0f};
@@ -60,13 +79,31 @@ int main()
 
     if (FAILED(hr)) {
         print_hresult("sum (float)", hr);
-        return 3;
+        return 4;
     }
 
     std::cout << "Float sum:\n";
     for (std::size_t i = 0; i < fout.size(); ++i)
         std::cout << fa[i] << " + " << fb[i]
                   << " = " << fout[i] << '\n';
+
+    std::vector<float> fmul_out(fa.size());
+    hr = context.mul(
+        DXGI_FORMAT_R32_FLOAT,
+        fa.data(),
+        fb.data(),
+        fmul_out.data(),
+        fmul_out.size());
+
+    if (FAILED(hr)) {
+        print_hresult("mul (float)", hr);
+        return 5;
+    }
+
+    std::cout << "Float mul:\n";
+    for (std::size_t i = 0; i < fmul_out.size(); ++i)
+        std::cout << fa[i] << " * " << fb[i]
+                  << " = " << fmul_out[i] << '\n';
 
     dxblas::NativeD3D11 native{};
     hr = dxblas::get_native_d3d11(context, native);

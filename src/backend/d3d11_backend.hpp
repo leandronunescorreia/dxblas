@@ -32,6 +32,13 @@ public:
         void* out,
         std::size_t count) override;
 
+    HRESULT mul(
+        DXGI_FORMAT format,
+        const void* a,
+        const void* b,
+        void* out,
+        std::size_t count) override;
+
     HRESULT get_native(
         ID3D11Device** device,
         ID3D11DeviceContext** context) const;

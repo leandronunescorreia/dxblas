@@ -27,8 +27,8 @@ step_five_dispatching_the_shader()
 step_six_reading_back_the_buffer()
 ```
 
-The current public operation wires these steps together for a simple element-wise
-1D buffer addition (`Buffer<T>` + `Buffer<T>` -> `RWBuffer<T>`).
+The current public operations wire these steps together for element-wise
+1D buffer addition (`sum`) and multiplication (`mul`).
 
 Supported formats in this first sample:
 

@@ -35,6 +35,16 @@ HRESULT Context::sum(
     return backend_ ? backend_->sum(format, a, b, out, count) : E_POINTER;
 }
 
+HRESULT Context::mul(
+    DXGI_FORMAT format,
+    const void* a,
+    const void* b,
+    void* out,
+    std::size_t count)
+{
+    return backend_ ? backend_->mul(format, a, b, out, count) : E_POINTER;
+}
+
 IBackend* Context::backend() noexcept
 {
     return backend_.get();

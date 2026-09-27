@@ -35,6 +35,13 @@ public:
         void* out,
         std::size_t count);
 
+    HRESULT mul(
+        DXGI_FORMAT format,
+        const void* a,
+        const void* b,
+        void* out,
+        std::size_t count);
+
     IBackend* backend() noexcept;
     const IBackend* backend() const noexcept;
 
