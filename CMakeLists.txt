@@ -17,7 +17,18 @@ option(dxBLAS_ENABLE_D3D11_DEBUG "Define D3D11 debug support for the library" OF
 
 add_library(dxblas
     src/dxblas.cpp
-    src/d3d11_backend.cpp)
+    src/d3d11_backend.cpp
+    src/backend/d3d11_shader_manager.cpp
+    src/backend/d3d11_shader_manager.hpp
+    src/shaders/sum.hlsl
+    src/shaders/mul.hlsl)
+
+set_source_files_properties(
+    src/shaders/sum.hlsl
+    src/shaders/mul.hlsl
+    PROPERTIES HEADER_FILE_ONLY TRUE)
+
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_include_directories(dxblas
     PUBLIC

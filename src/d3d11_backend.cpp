@@ -1,15 +1,13 @@
 #include "backend/d3d11_backend.hpp"
+#include "backend/d3d11_shader_manager.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -18,112 +16,27 @@ namespace dxblas::detail {
 
 namespace {
 
-enum class BinaryOp {
-    Add,
-    Mul,
-};
-
-struct ShaderKey {
-    BinaryOp op;
-    DXGI_FORMAT format;
-
-    bool operator==(const ShaderKey& other) const noexcept
-    {
-        return op == other.op && format == other.format;
-    }
-};
-
-struct ShaderKeyHash {
-    std::size_t operator()(const ShaderKey& key) const noexcept
-    {
-        return (static_cast<std::size_t>(key.op) << 16) ^ static_cast<std::size_t>(key.format);
-    }
-};
-
 struct FormatInfo {
     UINT bytes_per_element;
-    const char* hlsl_type;
 };
 
 HRESULT get_format_info(DXGI_FORMAT format, FormatInfo& info)
 {
     switch (format) {
     case DXGI_FORMAT_R8_UINT:
-        info = {1, "uint"};
+        info = {1};
         return S_OK;
     case DXGI_FORMAT_R16_UINT:
-        info = {2, "uint"};
+        info = {2};
         return S_OK;
     case DXGI_FORMAT_R32_UINT:
-        info = {4, "uint"};
+        info = {4};
         return S_OK;
     case DXGI_FORMAT_R32_FLOAT:
-        info = {4, "float"};
+        info = {4};
         return S_OK;
     default:
         return E_INVALIDARG;
-    }
-}
-
-const char* shader_source_for(BinaryOp op, DXGI_FORMAT format)
-{
-    switch (format) {
-    case DXGI_FORMAT_R8_UINT:
-    case DXGI_FORMAT_R16_UINT:
-    case DXGI_FORMAT_R32_UINT:
-        if (op == BinaryOp::Add) {
-            return R"(
-Buffer<uint> input_a : register(t0);
-Buffer<uint> input_b : register(t1);
-RWBuffer<uint> output_buf : register(u0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-    output_buf[id.x] = input_a[id.x] + input_b[id.x];
-}
-)";
-        } else {
-            return R"(
-Buffer<uint> input_a : register(t0);
-Buffer<uint> input_b : register(t1);
-RWBuffer<uint> output_buf : register(u0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-    output_buf[id.x] = input_a[id.x] * input_b[id.x];
-}
-)";
-        }
-    case DXGI_FORMAT_R32_FLOAT:
-        if (op == BinaryOp::Add) {
-            return R"(
-Buffer<float> input_a : register(t0);
-Buffer<float> input_b : register(t1);
-RWBuffer<float> output_buf : register(u0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-    output_buf[id.x] = input_a[id.x] + input_b[id.x];
-}
-)";
-        } else {
-            return R"(
-Buffer<float> input_a : register(t0);
-Buffer<float> input_b : register(t1);
-RWBuffer<float> output_buf : register(u0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-    output_buf[id.x] = input_a[id.x] * input_b[id.x];
-}
-)";
-        }
-    default:
-        return nullptr;
     }
 }
 
@@ -276,55 +189,7 @@ public:
         DXGI_FORMAT format,
         ComPtr<ID3D11ComputeShader>& shader)
     {
-        const ShaderKey key{op, format};
-        auto it = shader_cache.find(key);
-        if (it != shader_cache.end()) {
-            shader = it->second;
-            return S_OK;
-        }
-
-        const char* source = shader_source_for(op, format);
-        if (!source)
-            return E_INVALIDARG;
-
-        ComPtr<ID3DBlob> bytecode;
-        ComPtr<ID3DBlob> errors;
-
-        const char* shader_name = (op == BinaryOp::Add) ? "dxblas_sum.hlsl" : "dxblas_mul.hlsl";
-
-        HRESULT hr = D3DCompile(
-            source,
-            std::strlen(source),
-            shader_name,
-            nullptr,
-            nullptr,
-            "main",
-            "cs_5_0",
-            D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
-            0,
-            &bytecode,
-            &errors);
-
-        if (FAILED(hr)) {
-            if (errors) {
-                shader_error.assign(
-                    static_cast<const char*>(errors->GetBufferPointer()),
-                    errors->GetBufferSize());
-            }
-            return hr;
-        }
-
-        hr = device->CreateComputeShader(
-            bytecode->GetBufferPointer(),
-            bytecode->GetBufferSize(),
-            nullptr,
-            &shader);
-
-        if (SUCCEEDED(hr)) {
-            shader_cache[key] = shader;
-        }
-
-        return hr;
+        return shader_manager.get_or_compile(device.Get(), op, format, shader);
     }
 
     HRESULT step_five_dispatching_the_shader(
@@ -444,7 +309,7 @@ public:
         hr = create_readback_buffer(device.Get(), byte_width, readback);
         if (FAILED(hr)) return hr;
 
-        // Step 4: Compile shader (cached)
+        // Step 4: Compile shader (cached via D3D11ShaderManager)
         hr = step_four_compiling_the_shader(op, format, shader);
         if (FAILED(hr)) return hr;
 
@@ -484,8 +349,7 @@ public:
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    std::unordered_map<ShaderKey, ComPtr<ID3D11ComputeShader>, ShaderKeyHash> shader_cache;
-    std::string shader_error;
+    D3D11ShaderManager shader_manager;
 };
 
 D3D11Backend::D3D11Backend(
