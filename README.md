@@ -31,7 +31,8 @@ dxblas/
 │   └── backend/
 │       └── d3d11_backend.hpp       # Internal D3D11Backend declaration
 └── examples/
-    └── step_by_step.cpp            # Example demonstrating sum, mul, and native handle access
+    ├── fist_step.cpp               # Introductory sample demonstrating sum, mul, and native handles
+    └── big_array.cpp               # Sample testing 512-element arrays across 8 thread groups
 ```
 
 ### Component Breakdown
@@ -41,7 +42,8 @@ dxblas/
 - **`src/dxblas.cpp`**: Implements `Context`, forwarding BLAS operations directly to the active backend.
 - **`src/backend/d3d11_backend.hpp`**: Internal declaration of `D3D11Backend`, utilizing PImpl to prevent leaking `<d3d11.h>` into public headers.
 - **`src/d3d11_backend.cpp`**: Full Direct3D 11 compute pipeline. Implements device creation with automatic debug-layer fallback, 1D buffer allocation, subresource upload, runtime HLSL compilation with shader caching, dispatch, and staging readback.
-- **`examples/step_by_step.cpp`**: Educational sample verifying element-wise vector addition (`sum`) and multiplication (`mul`) on `uint32` and `float` data.
+- **`examples/fist_step.cpp`**: Educational sample verifying element-wise vector addition (`sum`) and multiplication (`mul`) on `uint32` and `float` data.
+- **`examples/big_array.cpp`**: Benchmark/verification sample computing `sum` and `mul` on 512 elements (8 thread groups of 64 threads) with CPU validation.
 
 ## Baby steps
 
@@ -112,5 +114,8 @@ IBackend
 Remove-Item -Recurse -Force build
 cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-.\build\dxblas_step_by_step.exe
+
+# Run samples
+.\build\dxblas_first_step.exe
+.\build\dxblas_big_array.exe
 ```

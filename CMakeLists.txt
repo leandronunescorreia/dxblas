@@ -43,13 +43,24 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 if(dxBLAS_BUILD_EXAMPLE)
-    add_executable(dxblas_step_by_step
-        examples/step_by_step.cpp)
+    add_executable(dxblas_first_step
+        examples/fist_step.cpp)
 
-    target_link_libraries(dxblas_step_by_step
+    target_link_libraries(dxblas_first_step
         PRIVATE dxblas)
 
-    target_compile_definitions(dxblas_step_by_step
+    target_compile_definitions(dxblas_first_step
+        PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX)
+
+    add_executable(dxblas_big_array
+        examples/big_array.cpp)
+
+    target_link_libraries(dxblas_big_array
+        PRIVATE dxblas)
+
+    target_compile_definitions(dxblas_big_array
         PRIVATE
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
