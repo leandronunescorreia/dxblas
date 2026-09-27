@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 
 #include <d3d11.h>
 #include <dxgiformat.h>
@@ -15,6 +16,8 @@ public:
     Context(
         D3D_DRIVER_TYPE driver_type = D3D_DRIVER_TYPE_HARDWARE,
         UINT device_flags = 0);
+
+    explicit Context(std::unique_ptr<IBackend> backend);
 
     ~Context();
 
@@ -36,8 +39,7 @@ public:
     const IBackend* backend() const noexcept;
 
 private:
-    class Impl;
-    Impl* impl_;
+    std::unique_ptr<IBackend> backend_;
 };
 
 struct NativeD3D11 {

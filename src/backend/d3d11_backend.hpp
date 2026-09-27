@@ -5,7 +5,6 @@
 
 #include <d3d11.h>
 #include <dxgiformat.h>
-#include <wrl/client.h>
 
 #include <dxblas/backend.hpp>
 
@@ -19,7 +18,12 @@ public:
 
     ~D3D11Backend() override;
 
-    HRESULT initialize();
+    D3D11Backend(const D3D11Backend&) = delete;
+    D3D11Backend& operator=(const D3D11Backend&) = delete;
+    D3D11Backend(D3D11Backend&&) noexcept;
+    D3D11Backend& operator=(D3D11Backend&&) noexcept;
+
+    HRESULT initialize() override;
 
     HRESULT sum(
         DXGI_FORMAT format,

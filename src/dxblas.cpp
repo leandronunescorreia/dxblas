@@ -6,43 +6,23 @@
 
 namespace dxblas {
 
-class Context::Impl {
-public:
-    Impl(D3D_DRIVER_TYPE driver_type, UINT device_flags)
-        : backend(driver_type, device_flags)
-    {
-    }
-
-    detail::D3D11Backend backend;
-};
-
 Context::Context(D3D_DRIVER_TYPE driver_type, UINT device_flags)
-    : impl_(new Impl(driver_type, device_flags))
+    : backend_(std::make_unique<detail::D3D11Backend>(driver_type, device_flags))
 {
 }
 
-Context::~Context()
-{
-    delete impl_;
-}
-
-Context::Context(Context&& other) noexcept
-    : impl_(std::exchange(other.impl_, nullptr))
+Context::Context(std::unique_ptr<IBackend> backend)
+    : backend_(std::move(backend))
 {
 }
 
-Context& Context::operator=(Context&& other) noexcept
-{
-    if (this != &other) {
-        delete impl_;
-        impl_ = std::exchange(other.impl_, nullptr);
-    }
-    return *this;
-}
+Context::~Context() = default;
+Context::Context(Context&&) noexcept = default;
+Context& Context::operator=(Context&&) noexcept = default;
 
 HRESULT Context::initialize()
 {
-    return impl_->backend.initialize();
+    return backend_ ? backend_->initialize() : E_POINTER;
 }
 
 HRESULT Context::sum(
@@ -52,17 +32,17 @@ HRESULT Context::sum(
     void* out,
     std::size_t count)
 {
-    return impl_->backend.sum(format, a, b, out, count);
+    return backend_ ? backend_->sum(format, a, b, out, count) : E_POINTER;
 }
 
 IBackend* Context::backend() noexcept
 {
-    return &impl_->backend;
+    return backend_.get();
 }
 
 const IBackend* Context::backend() const noexcept
 {
-    return &impl_->backend;
+    return backend_.get();
 }
 
 HRESULT get_native_d3d11(Context& context, NativeD3D11& native)
