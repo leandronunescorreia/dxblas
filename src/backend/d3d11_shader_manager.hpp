@@ -39,10 +39,15 @@ public:
         ID3D11Device* device,
         BinaryOp op,
         DXGI_FORMAT format,
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader>& out_shader);
+        Microsoft::WRL::ComPtr<ID3D11PixelShader>& out_shader);
+
+    HRESULT get_or_compile_fullscreen_vertex_shader(
+        ID3D11Device* device,
+        Microsoft::WRL::ComPtr<ID3D11VertexShader>& out_shader,
+        Microsoft::WRL::ComPtr<ID3DBlob>& out_bytecode);
 
     const std::string& last_error() const noexcept { return last_error_; }
-    void clear() noexcept { cache_.clear(); }
+    void clear() noexcept;
 
 private:
     struct ShaderKeyHash {
@@ -52,7 +57,9 @@ private:
         }
     };
 
-    std::unordered_map<ShaderKey, Microsoft::WRL::ComPtr<ID3D11ComputeShader>, ShaderKeyHash> cache_;
+    std::unordered_map<ShaderKey, Microsoft::WRL::ComPtr<ID3D11PixelShader>, ShaderKeyHash> pixel_cache_;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> fullscreen_vertex_shader_;
+    Microsoft::WRL::ComPtr<ID3DBlob> fullscreen_vertex_bytecode_;
     std::string last_error_;
 };
 

@@ -10,36 +10,94 @@ namespace dxblas::detail {
 
 namespace {
 
-constexpr const char* kSumShaderSource = R"(
-#ifndef DTYPE
-#define DTYPE float
-#endif
-
-Buffer<DTYPE> input_a : register(t0);
-Buffer<DTYPE> input_b : register(t1);
-RWBuffer<DTYPE> output_buf : register(u0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+constexpr const char* kFullscreenVertexShaderSource = R"(
+struct VSOutput
 {
-    output_buf[id.x] = input_a[id.x] + input_b[id.x];
+    float4 position : SV_Position;
+};
+
+VSOutput main(uint vertex_id : SV_VertexID)
+{
+    VSOutput output;
+
+    // Full-screen triangle. No vertex/index buffer is required.
+    float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2(-1.0,  3.0),
+        float2( 3.0, -1.0)
+    };
+
+    output.position = float4(positions[vertex_id], 0.0, 1.0);
+    return output;
 }
 )";
 
-constexpr const char* kMulShaderSource = R"(
+constexpr const char* kSumPixelShaderSource = R"(
 #ifndef DTYPE
 #define DTYPE float
 #endif
 
-Buffer<DTYPE> input_a : register(t0);
-Buffer<DTYPE> input_b : register(t1);
-RWBuffer<DTYPE> output_buf : register(u0);
+Texture2D<DTYPE> input_a : register(t0);
+Texture2D<DTYPE> input_b : register(t1);
 
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+struct PSInput
 {
-    output_buf[id.x] = input_a[id.x] * input_b[id.x];
+    float4 position : SV_Position;
+};
+
+#ifdef INTEGER_OUTPUT
+float4 main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    uint value = input_a.Load(int3(pixel, 0)) + input_b.Load(int3(pixel, 0));
+
+    return float4(
+        float(value & 0xffu),
+        float((value >> 8) & 0xffu),
+        float((value >> 16) & 0xffu),
+        float((value >> 24) & 0xffu)) / 255.0;
 }
+#else
+DTYPE main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    return input_a.Load(int3(pixel, 0)) + input_b.Load(int3(pixel, 0));
+}
+#endif
+)";
+
+constexpr const char* kMulPixelShaderSource = R"(
+#ifndef DTYPE
+#define DTYPE float
+#endif
+
+Texture2D<DTYPE> input_a : register(t0);
+Texture2D<DTYPE> input_b : register(t1);
+
+struct PSInput
+{
+    float4 position : SV_Position;
+};
+
+#ifdef INTEGER_OUTPUT
+float4 main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    uint value = input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
+
+    return float4(
+        float(value & 0xffu),
+        float((value >> 8) & 0xffu),
+        float((value >> 16) & 0xffu),
+        float((value >> 24) & 0xffu)) / 255.0;
+}
+#else
+DTYPE main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    return input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
+}
+#endif
 )";
 
 const char* get_dtype_string(DXGI_FORMAT format)
@@ -65,19 +123,18 @@ std::string load_shader_source(BinaryOp op, const char*& source_name)
     case BinaryOp::Add:
         filename = "sum.hlsl";
         source_name = "sum.hlsl";
-        fallback_source = kSumShaderSource;
+        fallback_source = kSumPixelShaderSource;
         break;
     case BinaryOp::Mul:
         filename = "mul.hlsl";
         source_name = "mul.hlsl";
-        fallback_source = kMulShaderSource;
+        fallback_source = kMulPixelShaderSource;
         break;
     default:
         source_name = "unknown.hlsl";
         return {};
     }
 
-    // Attempt to load from disk (supports live editing and debugging)
     const std::string search_paths[] = {
         std::string("src/shaders/") + filename,
         std::string("../src/shaders/") + filename,
@@ -91,14 +148,55 @@ std::string load_shader_source(BinaryOp op, const char*& source_name)
             std::ostringstream ss;
             ss << file.rdbuf();
             std::string content = ss.str();
-            if (!content.empty()) {
+            if (!content.empty())
                 return content;
-            }
         }
     }
 
-    // Gracefully fall back to embedded HLSL source if not available on disk
     return std::string(fallback_source);
+}
+
+HRESULT compile_shader(
+    const std::string& source,
+    const char* source_name,
+    const D3D_SHADER_MACRO* defines,
+    const char* profile,
+    Microsoft::WRL::ComPtr<ID3DBlob>& bytecode,
+    std::string& last_error)
+{
+    UINT compile_flags = D3DCOMPILE_ENABLE_STRICTNESS;
+#if defined(_DEBUG) || defined(DEBUG)
+    compile_flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+    compile_flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3DCompile(
+        source.c_str(),
+        source.size(),
+        source_name,
+        defines,
+        D3D_COMPILE_STANDARD_FILE_INCLUDE,
+        "main",
+        profile,
+        compile_flags,
+        0,
+        &bytecode,
+        &errors);
+
+    if (FAILED(hr)) {
+        if (errors) {
+            last_error.assign(
+                static_cast<const char*>(errors->GetBufferPointer()),
+                errors->GetBufferSize());
+            OutputDebugStringA(last_error.c_str());
+        } else {
+            last_error = "D3DCompile failed without error blob.";
+        }
+    }
+
+    return hr;
 }
 
 } // namespace
@@ -107,87 +205,107 @@ HRESULT D3D11ShaderManager::get_or_compile(
     ID3D11Device* device,
     BinaryOp op,
     DXGI_FORMAT format,
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader>& out_shader)
+    Microsoft::WRL::ComPtr<ID3D11PixelShader>& out_shader)
 {
     if (!device)
         return E_POINTER;
 
-    // Check cache first
     const ShaderKey key{op, format};
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
+    auto it = pixel_cache_.find(key);
+    if (it != pixel_cache_.end()) {
         out_shader = it->second;
         return S_OK;
     }
 
-    // Resolve preprocessor configuration
     const char* dtype = get_dtype_string(format);
     if (!dtype) {
-        last_error_ = "Unsupported DXGI_FORMAT for compute shader.";
+        last_error_ = "Unsupported DXGI_FORMAT for pixel shader.";
         return E_INVALIDARG;
     }
 
     const char* source_name = nullptr;
     std::string shader_code = load_shader_source(op, source_name);
     if (shader_code.empty()) {
-        last_error_ = "Failed to load shader source.";
+        last_error_ = "Failed to load pixel shader source.";
         return E_FAIL;
     }
 
-    D3D_SHADER_MACRO defines[] = {
-        {"DTYPE", dtype},
-        {nullptr, nullptr}
-    };
+    const bool integer_output = format == DXGI_FORMAT_R8_UINT ||
+                                 format == DXGI_FORMAT_R16_UINT ||
+                                 format == DXGI_FORMAT_R32_UINT;
 
-    // Configure compilation flags following Direct3D best practices
-    UINT compile_flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#if defined(_DEBUG) || defined(DEBUG)
-    compile_flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-    compile_flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#endif
+    D3D_SHADER_MACRO defines[3]{};
+    defines[0] = {"DTYPE", dtype};
+    if (integer_output)
+        defines[1] = {"INTEGER_OUTPUT", "1"};
 
     Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-    Microsoft::WRL::ComPtr<ID3DBlob> errors;
-
-    HRESULT hr = D3DCompile(
-        shader_code.c_str(),
-        shader_code.size(),
-        source_name,
-        defines,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "main",
-        "cs_5_0",
-        compile_flags,
-        0,
-        &bytecode,
-        &errors);
-
-    if (FAILED(hr)) {
-        if (errors) {
-            last_error_.assign(
-                static_cast<const char*>(errors->GetBufferPointer()),
-                errors->GetBufferSize());
-            OutputDebugStringA(last_error_.c_str());
-        } else {
-            last_error_ = "D3DCompile failed without error blob.";
-        }
+    HRESULT hr = compile_shader(
+        shader_code, source_name, defines, "ps_5_0", bytecode, last_error_);
+    if (FAILED(hr))
         return hr;
-    }
 
-    hr = device->CreateComputeShader(
+    hr = device->CreatePixelShader(
         bytecode->GetBufferPointer(),
         bytecode->GetBufferSize(),
         nullptr,
         &out_shader);
 
     if (FAILED(hr)) {
-        last_error_ = "CreateComputeShader failed with HRESULT: " + std::to_string(hr);
+        last_error_ = "CreatePixelShader failed with HRESULT: " + std::to_string(hr);
         return hr;
     }
 
-    cache_[key] = out_shader;
+    pixel_cache_[key] = out_shader;
     return S_OK;
+}
+
+HRESULT D3D11ShaderManager::get_or_compile_fullscreen_vertex_shader(
+    ID3D11Device* device,
+    Microsoft::WRL::ComPtr<ID3D11VertexShader>& out_shader,
+    Microsoft::WRL::ComPtr<ID3DBlob>& out_bytecode)
+{
+    if (!device)
+        return E_POINTER;
+
+    if (fullscreen_vertex_shader_) {
+        out_shader = fullscreen_vertex_shader_;
+        out_bytecode = fullscreen_vertex_bytecode_;
+        return S_OK;
+    }
+
+    Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+    HRESULT hr = compile_shader(
+        kFullscreenVertexShaderSource,
+        "fullscreen_triangle.hlsl",
+        nullptr,
+        "vs_5_0",
+        bytecode,
+        last_error_);
+    if (FAILED(hr))
+        return hr;
+
+    hr = device->CreateVertexShader(
+        bytecode->GetBufferPointer(),
+        bytecode->GetBufferSize(),
+        nullptr,
+        &fullscreen_vertex_shader_);
+    if (FAILED(hr)) {
+        last_error_ = "CreateVertexShader failed with HRESULT: " + std::to_string(hr);
+        return hr;
+    }
+
+    fullscreen_vertex_bytecode_ = bytecode;
+    out_shader = fullscreen_vertex_shader_;
+    out_bytecode = fullscreen_vertex_bytecode_;
+    return S_OK;
+}
+
+void D3D11ShaderManager::clear() noexcept
+{
+    pixel_cache_.clear();
+    fullscreen_vertex_shader_.Reset();
+    fullscreen_vertex_bytecode_.Reset();
 }
 
 } // namespace dxblas::detail

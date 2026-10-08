@@ -11,7 +11,7 @@ The goals are:
 - A backend interface separates the public API from the graphics API.
 - Each backend implementation encapsulates platform-specific types using the PImpl idiom.
 - Shaders are cached per operation and format so compilation only occurs once on demand.
-- Native 1D GPU buffers (`ID3D11Buffer`) instead of 2D textures.
+- Offscreen `Texture2D` render targets instead of compute buffers.
 - The first example is intentionally small and debug-friendly.
 
 ## Project Structure
@@ -27,12 +27,12 @@ dxblas/
 │       └── dxblas.hpp              # Public Context API and native interop helpers
 ├── src/
 │   ├── dxblas.cpp                  # Context implementation (owns std::unique_ptr<IBackend>)
-│   ├── d3d11_backend.cpp           # Direct3D 11 compute pipeline implementation (PImpl)
+│   ├── d3d11_backend.cpp           # Direct3D 11 classic graphics pipeline implementation (PImpl)
 │   └── backend/
 │       └── d3d11_backend.hpp       # Internal D3D11Backend declaration
 └── examples/
     ├── fist_step.cpp               # Introductory sample demonstrating sum, mul, and native handles
-    └── big_array.cpp               # Sample testing 512-element arrays across 8 thread groups
+    └── big_array.cpp               # Sample testing 512-element arrays through an offscreen pixel pass
 ```
 
 ### Component Breakdown
@@ -41,9 +41,9 @@ dxblas/
 - **`include/dxblas/dxblas.hpp`**: Public library facade. Declares `dxblas::Context`, which manages backend lifetime via `std::unique_ptr<IBackend>`, and provides native handle queries (`get_native_d3d11`).
 - **`src/dxblas.cpp`**: Implements `Context`, forwarding BLAS operations directly to the active backend.
 - **`src/backend/d3d11_backend.hpp`**: Internal declaration of `D3D11Backend`, utilizing PImpl to prevent leaking `<d3d11.h>` into public headers.
-- **`src/d3d11_backend.cpp`**: Full Direct3D 11 compute pipeline. Implements device creation with automatic debug-layer fallback, 1D buffer allocation, subresource upload, runtime HLSL compilation with shader caching, dispatch, and staging readback.
+- **`src/d3d11_backend.cpp`**: Full Direct3D 11 classic graphics pipeline. Implements device creation with automatic debug-layer fallback, Texture2D allocation/upload, runtime HLSL compilation with shader caching, full-screen-triangle pixel rendering, and staging texture readback.
 - **`examples/fist_step.cpp`**: Educational sample verifying element-wise vector addition (`sum`) and multiplication (`mul`) on `uint32` and `float` data.
-- **`examples/big_array.cpp`**: Benchmark/verification sample computing `sum` and `mul` on 512 elements (8 thread groups of 64 threads) with CPU validation.
+- **`examples/big_array.cpp`**: Benchmark/verification sample computing `sum` and `mul` on 512 elements through offscreen Texture2D pixel passes with CPU validation.
 
 ## Baby steps
 
@@ -51,11 +51,11 @@ The D3D11 backend is intentionally organized as:
 
 ```text
 step_one_creating_the_device()
-step_two_creating_the_buffer()
-step_three_uploading_the_buffer()
-step_four_compiling_the_shader()   <-- cached per (op, format)
-step_five_dispatching_the_shader()
-step_six_reading_back_the_buffer()
+step_two_creating_input_texture()
+step_three_creating_output_texture()
+step_four_compiling_shaders()      <-- cached per (op, format)
+step_five_rendering_the_shader()
+step_six_reading_back_texture()
 ```
 
 The current public operations wire these steps together for element-wise
@@ -89,7 +89,7 @@ dxblas::IBackend (Interface)
         |         +-- ID3D11Device
         |         +-- ID3D11DeviceContext
         |         +-- shader_cache (std::unordered_map)
-        |         +-- buffers
+        |         +-- Texture2D inputs / render target / staging texture
         |
         +-- (Future) OpenGLBackend
         +-- (Future) VulkanBackend
@@ -106,6 +106,24 @@ IBackend
   +-- OpenGLBackend (PImpl)
   +-- VulkanBackend (PImpl)
   +-- MetalBackend (PImpl)
+```
+
+## DX11 backend from the compute pipeline to a classic graphics pipeline
+```text
+C++ input arrays
+      │
+      ▼
+Texture2D A ─────┐
+                 ├──► Pixel Shader ───► offscreen Texture2D
+Texture2D B ─────┘       ▲
+                         │
+                 Full-screen triangle
+                         │
+                         ▼
+                  staging Texture2D
+                         │
+                         ▼
+                    C++ output
 ```
 
 ## Build & Run

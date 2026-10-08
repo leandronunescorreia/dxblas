@@ -18,7 +18,7 @@ int main()
 {
     constexpr std::size_t N = 512;
     std::cout << "=== dxBLAS: 512-Element Array Sample ===\n";
-    std::cout << "Element count: " << N << " (" << (N / 64) << " thread groups of 64 threads)\n\n";
+    std::cout << "Element count: " << N << " (offscreen Texture2D pixel pass)\n\n";
 
     // Initialize context
     dxblas::Context context(

@@ -2,10 +2,10 @@
 #include "backend/d3d11_shader_manager.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include <wrl/client.h>
@@ -18,90 +18,109 @@ namespace {
 
 struct FormatInfo {
     UINT bytes_per_element;
+    bool integer;
 };
 
 HRESULT get_format_info(DXGI_FORMAT format, FormatInfo& info)
 {
     switch (format) {
     case DXGI_FORMAT_R8_UINT:
-        info = {1};
+        info = {1, true};
         return S_OK;
     case DXGI_FORMAT_R16_UINT:
-        info = {2};
+        info = {2, true};
         return S_OK;
     case DXGI_FORMAT_R32_UINT:
-        info = {4};
+        info = {4, true};
         return S_OK;
     case DXGI_FORMAT_R32_FLOAT:
-        info = {4};
+        info = {4, false};
         return S_OK;
     default:
         return E_INVALIDARG;
     }
 }
 
-HRESULT create_buffer(
+HRESULT create_texture(
     ID3D11Device* device,
-    UINT byte_width,
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
     UINT bind_flags,
     D3D11_USAGE usage,
     UINT cpu_access_flags,
-    ComPtr<ID3D11Buffer>& buffer)
+    const void* initial_data,
+    UINT row_pitch,
+    ComPtr<ID3D11Texture2D>& texture)
 {
-    D3D11_BUFFER_DESC desc{};
-    desc.ByteWidth = byte_width;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
     desc.Usage = usage;
     desc.BindFlags = bind_flags;
     desc.CPUAccessFlags = cpu_access_flags;
 
-    return device->CreateBuffer(&desc, nullptr, &buffer);
+    D3D11_SUBRESOURCE_DATA data{};
+    if (initial_data) {
+        data.pSysMem = initial_data;
+        data.SysMemPitch = row_pitch;
+    }
+
+    return device->CreateTexture2D(
+        &desc,
+        initial_data ? &data : nullptr,
+        &texture);
 }
 
-HRESULT create_buffer_srv(
+HRESULT create_texture_srv(
     ID3D11Device* device,
-    ID3D11Buffer* buffer,
+    ID3D11Texture2D* texture,
     DXGI_FORMAT format,
-    UINT num_elements,
     ComPtr<ID3D11ShaderResourceView>& srv)
 {
     D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
     desc.Format = format;
-    desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-    desc.Buffer.FirstElement = 0;
-    desc.Buffer.NumElements = num_elements;
-
-    return device->CreateShaderResourceView(buffer, &desc, &srv);
+    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    desc.Texture2D.MostDetailedMip = 0;
+    desc.Texture2D.MipLevels = 1;
+    return device->CreateShaderResourceView(texture, &desc, &srv);
 }
 
-HRESULT create_buffer_uav(
+HRESULT create_texture_rtv(
     ID3D11Device* device,
-    ID3D11Buffer* buffer,
+    ID3D11Texture2D* texture,
     DXGI_FORMAT format,
-    UINT num_elements,
-    ComPtr<ID3D11UnorderedAccessView>& uav)
+    ComPtr<ID3D11RenderTargetView>& rtv)
 {
-    D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+    D3D11_RENDER_TARGET_VIEW_DESC desc{};
     desc.Format = format;
-    desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    desc.Buffer.FirstElement = 0;
-    desc.Buffer.NumElements = num_elements;
-    desc.Buffer.Flags = 0;
-
-    return device->CreateUnorderedAccessView(buffer, &desc, &uav);
+    desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    desc.Texture2D.MipSlice = 0;
+    return device->CreateRenderTargetView(texture, &desc, &rtv);
 }
 
-HRESULT create_readback_buffer(
+HRESULT create_staging_texture(
     ID3D11Device* device,
-    UINT byte_width,
-    ComPtr<ID3D11Buffer>& buffer)
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
+    ComPtr<ID3D11Texture2D>& texture)
 {
-    return create_buffer(
+    return create_texture(
         device,
-        byte_width,
+        width,
+        height,
+        format,
         0,
         D3D11_USAGE_STAGING,
         D3D11_CPU_ACCESS_READ,
-        buffer);
+        nullptr,
+        0,
+        texture);
 }
 
 } // namespace
@@ -122,7 +141,6 @@ public:
         };
 
         D3D_FEATURE_LEVEL created_level{};
-
         HRESULT hr = D3D11CreateDevice(
             nullptr,
             driver_type,
@@ -136,10 +154,7 @@ public:
             &context);
 
         if (FAILED(hr) && (device_flags & D3D11_CREATE_DEVICE_DEBUG)) {
-            // The D3D11 debug layer (Graphics Tools) may not be installed.
-            // Automatically fallback to device creation without the debug flag.
             device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
-
             hr = D3D11CreateDevice(
                 nullptr,
                 driver_type,
@@ -153,81 +168,127 @@ public:
                 &context);
         }
 
-        if (FAILED(hr)) {
+        if (FAILED(hr))
             return hr;
-        }
 
         feature_level = created_level;
         return S_OK;
     }
 
-    HRESULT step_two_creating_the_buffer(
-        UINT byte_width,
-        UINT bind_flags,
-        ComPtr<ID3D11Buffer>& buffer)
+    HRESULT step_two_creating_input_texture(
+        DXGI_FORMAT format,
+        UINT width,
+        UINT height,
+        const void* data,
+        UINT row_pitch,
+        ComPtr<ID3D11Texture2D>& texture,
+        ComPtr<ID3D11ShaderResourceView>& srv)
     {
-        return create_buffer(
+        HRESULT hr = create_texture(
             device.Get(),
-            byte_width,
-            bind_flags,
+            width,
+            height,
+            format,
+            D3D11_BIND_SHADER_RESOURCE,
             D3D11_USAGE_DEFAULT,
             0,
-            buffer);
+            data,
+            row_pitch,
+            texture);
+        if (FAILED(hr))
+            return hr;
+
+        return create_texture_srv(device.Get(), texture.Get(), format, srv);
     }
 
-    HRESULT step_three_uploading_the_buffer(
-        ID3D11Buffer* buffer,
-        const void* data,
-        UINT byte_width)
+    HRESULT step_three_creating_output_texture(
+        DXGI_FORMAT format,
+        UINT width,
+        UINT height,
+        ComPtr<ID3D11Texture2D>& texture,
+        ComPtr<ID3D11RenderTargetView>& rtv)
     {
-        context->UpdateSubresource(buffer, 0, nullptr, data, byte_width, 0);
-        return S_OK;
+        HRESULT hr = create_texture(
+            device.Get(),
+            width,
+            height,
+            format,
+            D3D11_BIND_RENDER_TARGET,
+            D3D11_USAGE_DEFAULT,
+            0,
+            nullptr,
+            0,
+            texture);
+        if (FAILED(hr))
+            return hr;
+
+        return create_texture_rtv(device.Get(), texture.Get(), format, rtv);
     }
 
-    HRESULT step_four_compiling_the_shader(
+    HRESULT step_four_compiling_shaders(
         BinaryOp op,
         DXGI_FORMAT format,
-        ComPtr<ID3D11ComputeShader>& shader)
+        ComPtr<ID3D11VertexShader>& vertex_shader,
+        ComPtr<ID3D11PixelShader>& pixel_shader)
     {
-        return shader_manager.get_or_compile(device.Get(), op, format, shader);
+        ComPtr<ID3DBlob> vertex_bytecode;
+        HRESULT hr = shader_manager.get_or_compile_fullscreen_vertex_shader(
+            device.Get(), vertex_shader, vertex_bytecode);
+        if (FAILED(hr))
+            return hr;
+
+        return shader_manager.get_or_compile(
+            device.Get(), op, format, pixel_shader);
     }
 
-    HRESULT step_five_dispatching_the_shader(
-        ID3D11ComputeShader* shader,
+    HRESULT step_five_rendering_the_shader(
+        ID3D11VertexShader* vertex_shader,
+        ID3D11PixelShader* pixel_shader,
         ID3D11ShaderResourceView* a,
         ID3D11ShaderResourceView* b,
-        ID3D11UnorderedAccessView* output,
-        UINT element_count)
+        ID3D11RenderTargetView* output,
+        UINT width,
+        UINT height)
     {
-        context->CSSetShader(shader, nullptr, 0);
+        D3D11_VIEWPORT viewport{};
+        viewport.TopLeftX = 0.0f;
+        viewport.TopLeftY = 0.0f;
+        viewport.Width = static_cast<float>(width);
+        viewport.Height = static_cast<float>(height);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+
+        context->OMSetRenderTargets(1, &output, nullptr);
+        context->RSSetViewports(1, &viewport);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vertex_shader, nullptr, 0);
+        context->PSSetShader(pixel_shader, nullptr, 0);
 
         ID3D11ShaderResourceView* srvs[] = {a, b};
-        context->CSSetShaderResources(0, 2, srvs);
+        context->PSSetShaderResources(0, 2, srvs);
 
-        ID3D11UnorderedAccessView* uavs[] = {output};
-        UINT initial_counts[] = {0};
-        context->CSSetUnorderedAccessViews(0, 1, uavs, initial_counts);
+        // Three vertices are generated by SV_VertexID. No vertex/index buffer is used.
+        context->Draw(3, 0);
 
-        // One-dimensional dispatch: 64 threads per thread-group
-        const UINT groups = (element_count + 63u) / 64u;
-        context->Dispatch(groups, 1, 1);
-
-        // Clean up bindings
         ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
-        context->CSSetShaderResources(0, 2, null_srvs);
+        context->PSSetShaderResources(0, 2, null_srvs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
 
-        ID3D11UnorderedAccessView* null_uavs[] = {nullptr};
-        context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
-
-        context->CSSetShader(nullptr, nullptr, 0);
         return S_OK;
     }
 
-    HRESULT step_six_reading_back_the_buffer(
-        ID3D11Buffer* output,
-        ID3D11Buffer* readback,
+    HRESULT step_six_reading_back_texture(
+        ID3D11Texture2D* output,
+        ID3D11Texture2D* readback,
         void* destination,
-        UINT byte_width)
+        UINT width,
+        UINT height,
+        UINT elements,
+        UINT bytes_per_element,
+        bool packed_integer)
     {
         context->CopyResource(readback, output);
 
@@ -238,11 +299,40 @@ public:
             D3D11_MAP_READ,
             0,
             &mapped);
-
         if (FAILED(hr))
             return hr;
 
-        std::memcpy(destination, mapped.pData, byte_width);
+        const UINT last_row_elements = elements - (height - 1u) * width;
+        auto* dst = static_cast<std::uint8_t*>(destination);
+        const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+
+        for (UINT y = 0; y < height; ++y) {
+            const UINT row_elements = (y + 1u == height) ? last_row_elements : width;
+            auto* row_dst = dst + static_cast<std::size_t>(y) * width * bytes_per_element;
+            const auto* row_src = src + static_cast<std::size_t>(y) * mapped.RowPitch;
+
+            if (!packed_integer) {
+                std::memcpy(row_dst, row_src, row_elements * bytes_per_element);
+                continue;
+            }
+
+            // Integer results are rendered into universally common R8G8B8A8_UNORM
+            // and packed little-endian by the pixel shader. Reconstruct the
+            // original scalar width before returning to the C++ caller.
+            for (UINT x = 0; x < row_elements; ++x) {
+                const auto* pixel = row_src + static_cast<std::size_t>(x) * 4u;
+                const std::uint32_t value =
+                    static_cast<std::uint32_t>(pixel[0]) |
+                    (static_cast<std::uint32_t>(pixel[1]) << 8) |
+                    (static_cast<std::uint32_t>(pixel[2]) << 16) |
+                    (static_cast<std::uint32_t>(pixel[3]) << 24);
+                std::memcpy(
+                    row_dst + static_cast<std::size_t>(x) * bytes_per_element,
+                    &value,
+                    bytes_per_element);
+            }
+        }
+
         context->Unmap(readback, 0);
         return S_OK;
     }
@@ -266,61 +356,103 @@ public:
         if (FAILED(hr))
             return hr;
 
-        const UINT element_count = static_cast<UINT>(count);
-        const UINT byte_width = element_count * info.bytes_per_element;
+        // Texture2D dimensions are bounded by the device. Keeping a moderate
+        // tile size also avoids allocating enormous temporary textures.
+        constexpr UINT kTileWidth = 4096;
+        constexpr UINT kTileHeight = 4096;
+        constexpr std::size_t kTileElements =
+            static_cast<std::size_t>(kTileWidth) * kTileHeight;
 
-        ComPtr<ID3D11Buffer> buffer_a;
-        ComPtr<ID3D11Buffer> buffer_b;
-        ComPtr<ID3D11Buffer> buffer_out;
-        ComPtr<ID3D11Buffer> readback;
-        ComPtr<ID3D11ShaderResourceView> srv_a;
-        ComPtr<ID3D11ShaderResourceView> srv_b;
-        ComPtr<ID3D11UnorderedAccessView> uav_out;
-        ComPtr<ID3D11ComputeShader> shader;
+        ComPtr<ID3D11VertexShader> vertex_shader;
+        ComPtr<ID3D11PixelShader> pixel_shader;
+        hr = step_four_compiling_shaders(op, format, vertex_shader, pixel_shader);
+        if (FAILED(hr))
+            return hr;
 
-        // Step 2: Create buffers
-        hr = step_two_creating_the_buffer(byte_width, D3D11_BIND_SHADER_RESOURCE, buffer_a);
-        if (FAILED(hr)) return hr;
+        const auto* src_a = static_cast<const std::uint8_t*>(a);
+        const auto* src_b = static_cast<const std::uint8_t*>(b);
+        auto* dst = static_cast<std::uint8_t*>(out);
 
-        hr = step_two_creating_the_buffer(byte_width, D3D11_BIND_SHADER_RESOURCE, buffer_b);
-        if (FAILED(hr)) return hr;
+        std::vector<std::uint8_t> padded_a;
+        std::vector<std::uint8_t> padded_b;
 
-        hr = step_two_creating_the_buffer(byte_width, D3D11_BIND_UNORDERED_ACCESS, buffer_out);
-        if (FAILED(hr)) return hr;
+        std::size_t offset = 0;
+        while (offset < count) {
+            const std::size_t remaining = count - offset;
+            const std::size_t tile_elements = std::min(remaining, kTileElements);
+            const UINT width = static_cast<UINT>(std::min<std::size_t>(kTileWidth, tile_elements));
+            const UINT height = static_cast<UINT>((tile_elements + width - 1u) / width);
+            const std::size_t texture_elements = static_cast<std::size_t>(width) * height;
+            const UINT row_pitch = width * info.bytes_per_element;
+            const DXGI_FORMAT output_format =
+                info.integer ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
+            const UINT tile_bytes = static_cast<UINT>(texture_elements * info.bytes_per_element);
 
-        // Step 3: Upload input data
-        hr = step_three_uploading_the_buffer(buffer_a.Get(), a, byte_width);
-        if (FAILED(hr)) return hr;
+            const void* upload_a = src_a + offset * info.bytes_per_element;
+            const void* upload_b = src_b + offset * info.bytes_per_element;
 
-        hr = step_three_uploading_the_buffer(buffer_b.Get(), b, byte_width);
-        if (FAILED(hr)) return hr;
+            // The last texture row may contain padding pixels. D3D11 uploads
+            // the entire texture, so pad those pixels with zeroes. The output
+            // copy below only copies the real element count.
+            if (texture_elements != tile_elements) {
+                padded_a.assign(tile_bytes, 0);
+                padded_b.assign(tile_bytes, 0);
+                const UINT real_bytes = static_cast<UINT>(tile_elements * info.bytes_per_element);
+                std::memcpy(padded_a.data(), upload_a, real_bytes);
+                std::memcpy(padded_b.data(), upload_b, real_bytes);
+                upload_a = padded_a.data();
+                upload_b = padded_b.data();
+            }
 
-        // Create buffer views
-        hr = create_buffer_srv(device.Get(), buffer_a.Get(), format, element_count, srv_a);
-        if (FAILED(hr)) return hr;
+            ComPtr<ID3D11Texture2D> input_a;
+            ComPtr<ID3D11Texture2D> input_b;
+            ComPtr<ID3D11ShaderResourceView> srv_a;
+            ComPtr<ID3D11ShaderResourceView> srv_b;
+            ComPtr<ID3D11Texture2D> output_texture;
+            ComPtr<ID3D11RenderTargetView> output_rtv;
+            ComPtr<ID3D11Texture2D> readback;
 
-        hr = create_buffer_srv(device.Get(), buffer_b.Get(), format, element_count, srv_b);
-        if (FAILED(hr)) return hr;
+            hr = step_two_creating_input_texture(
+                format, width, height, upload_a, row_pitch, input_a, srv_a);
+            if (FAILED(hr)) return hr;
 
-        hr = create_buffer_uav(device.Get(), buffer_out.Get(), format, element_count, uav_out);
-        if (FAILED(hr)) return hr;
+            hr = step_two_creating_input_texture(
+                format, width, height, upload_b, row_pitch, input_b, srv_b);
+            if (FAILED(hr)) return hr;
 
-        // Staging buffer for readback
-        hr = create_readback_buffer(device.Get(), byte_width, readback);
-        if (FAILED(hr)) return hr;
+            hr = step_three_creating_output_texture(
+                output_format, width, height, output_texture, output_rtv);
+            if (FAILED(hr)) return hr;
 
-        // Step 4: Compile shader (cached via D3D11ShaderManager)
-        hr = step_four_compiling_the_shader(op, format, shader);
-        if (FAILED(hr)) return hr;
+            hr = create_staging_texture(
+                device.Get(), width, height, output_format, readback);
+            if (FAILED(hr)) return hr;
 
-        // Step 5: Dispatch shader
-        hr = step_five_dispatching_the_shader(
-            shader.Get(), srv_a.Get(), srv_b.Get(), uav_out.Get(), element_count);
-        if (FAILED(hr)) return hr;
+            hr = step_five_rendering_the_shader(
+                vertex_shader.Get(),
+                pixel_shader.Get(),
+                srv_a.Get(),
+                srv_b.Get(),
+                output_rtv.Get(),
+                width,
+                height);
+            if (FAILED(hr)) return hr;
 
-        // Step 6: Readback result
-        return step_six_reading_back_the_buffer(
-            buffer_out.Get(), readback.Get(), out, byte_width);
+            hr = step_six_reading_back_texture(
+                output_texture.Get(),
+                readback.Get(),
+                dst + offset * info.bytes_per_element,
+                width,
+                height,
+                static_cast<UINT>(tile_elements),
+                info.bytes_per_element,
+                info.integer);
+            if (FAILED(hr)) return hr;
+
+            offset += tile_elements;
+        }
+
+        return S_OK;
     }
 
     HRESULT sum(
