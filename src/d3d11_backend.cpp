@@ -330,6 +330,88 @@ public:
         return arena_texture.readback_float(context.Get(), texture, out, count);
     }
 
+    HRESULT gemm(const float* a, const float* b, float* c,
+                 std::size_t m, std::size_t n, std::size_t k)
+    {
+        if (!a || !b || !c || m == 0 || n == 0 || k == 0)
+            return E_INVALIDARG;
+        constexpr std::size_t max_dimension = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+        if (m > max_dimension || n > max_dimension || k > max_dimension)
+            return E_INVALIDARG;
+        if (m > std::numeric_limits<std::size_t>::max() / k ||
+            k > std::numeric_limits<std::size_t>::max() / n ||
+            m > std::numeric_limits<std::size_t>::max() / n)
+            return E_INVALIDARG;
+
+        const UINT rows = static_cast<UINT>(m);
+        const UINT columns = static_cast<UINT>(n);
+        const UINT inner = static_cast<UINT>(k);
+
+        std::shared_ptr<GpuTexture> matrix_a;
+        std::shared_ptr<GpuTexture> matrix_b;
+        std::shared_ptr<GpuTexture> matrix_c;
+        HRESULT hr = arena_texture.upload_matrix_float(context.Get(), a, inner, rows, matrix_a);
+        if (FAILED(hr)) return hr;
+        hr = arena_texture.upload_matrix_float(context.Get(), b, columns, inner, matrix_b);
+        if (FAILED(hr)) return hr;
+        hr = arena_texture.acquire_matrix_float(columns, rows, matrix_c);
+        if (FAILED(hr)) return hr;
+
+        ComPtr<ID3D11VertexShader> vertex_shader;
+        ComPtr<ID3D11PixelShader> pixel_shader;
+        hr = compile_shaders(BinaryOp::Gemm, DXGI_FORMAT_R32_FLOAT,
+                             vertex_shader, pixel_shader);
+        if (FAILED(hr)) return hr;
+
+        struct GemmConstants { UINT m, n, k, padding; } constants{rows, columns, inner, 0};
+        D3D11_BUFFER_DESC cb_desc{};
+        cb_desc.ByteWidth = sizeof(GemmConstants);
+        cb_desc.Usage = D3D11_USAGE_DEFAULT;
+        cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> constant_buffer;
+        hr = device->CreateBuffer(&cb_desc, nullptr, &constant_buffer);
+        if (FAILED(hr)) return hr;
+        context->UpdateSubresource(constant_buffer.Get(), 0, nullptr, &constants, 0, 0);
+
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vertex_shader.Get(), nullptr, 0);
+        context->PSSetShader(pixel_shader.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {matrix_a->srv.Get(), matrix_b->srv.Get()};
+        context->PSSetShaderResources(0, 2, srvs);
+        ID3D11Buffer* cbs[] = {constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11RenderTargetView* rtv = matrix_c->rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+
+        // Render a limited number of rows per draw to reduce the chance that a
+        // very long pixel-shader invocation triggers the Windows GPU watchdog.
+        // This remains a pixel-shader path: no compute shader or UAV is used.
+        constexpr UINT rows_per_draw = 8;
+        for (UINT row_start = 0; row_start < rows; row_start += rows_per_draw) {
+            const UINT batch_rows = std::min(rows_per_draw, rows - row_start);
+            D3D11_VIEWPORT viewport{};
+            viewport.TopLeftX = 0.0f;
+            viewport.TopLeftY = static_cast<float>(row_start);
+            viewport.Width = static_cast<float>(columns);
+            viewport.Height = static_cast<float>(batch_rows);
+            viewport.MinDepth = 0.0f;
+            viewport.MaxDepth = 1.0f;
+            context->RSSetViewports(1, &viewport);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
+        context->PSSetShaderResources(0, 2, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+
+        return arena_texture.readback_float(context.Get(), matrix_c, c, m * n);
+    }
+
     HRESULT sum(
         DXGI_FORMAT format,
         const void* a,
@@ -394,6 +476,12 @@ HRESULT D3D11Backend::mul(
     std::size_t count)
 {
     return impl_->mul(format, a, b, out, count);
+}
+
+HRESULT D3D11Backend::gemm(const float* a, const float* b, float* c,
+                           std::size_t m, std::size_t n, std::size_t k)
+{
+    return impl_->gemm(a, b, c, m, n, k);
 }
 
 

@@ -64,6 +64,36 @@ DTYPE main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return i
 #endif
 )";
 
+// Embedded fallback so GEMM does not depend on the process working directory.
+// The external src/shaders/gemm.hlsl remains the editable source of record.
+constexpr const char* kGemmPixelShaderSource = R"(
+Texture2D<float> matrix_a : register(t0);
+Texture2D<float> matrix_b : register(t1);
+cbuffer GemmConstants : register(b0)
+{
+    uint M;
+    uint N;
+    uint K;
+    uint Padding;
+};
+struct PSInput { float4 position : SV_Position; };
+float main(PSInput input) : SV_Target
+{
+    const uint column = (uint)input.position.x;
+    const uint row = (uint)input.position.y;
+    if (row >= M || column >= N) return 0.0f;
+    float accumulator = 0.0f;
+    [loop]
+    for (uint inner = 0; inner < K; ++inner)
+    {
+        const float a = matrix_a.Load(int3((int)inner, (int)row, 0));
+        const float b = matrix_b.Load(int3((int)column, (int)inner, 0));
+        accumulator += a * b;
+    }
+    return accumulator;
+}
+)";
+
 const char* get_dtype_string(DXGI_FORMAT format)
 {
     switch (format) {
@@ -99,6 +129,11 @@ std::string load_shader_source(BinaryOp op, const char*& source_name)
         source_name = "mul.hlsl";
         fallback_source = kMulPixelShaderSource;
         break;
+    case BinaryOp::Gemm:
+        filename = "gemm.hlsl";
+        source_name = "gemm.hlsl";
+        fallback_source = kGemmPixelShaderSource;
+        break;
     default:
         source_name = "unknown.hlsl";
         return {};
@@ -122,7 +157,7 @@ std::string load_shader_source(BinaryOp op, const char*& source_name)
         }
     }
 
-    return std::string(fallback_source);
+    return fallback_source ? std::string(fallback_source) : std::string{};
 }
 
 HRESULT compile_shader(

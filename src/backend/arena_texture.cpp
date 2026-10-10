@@ -3,7 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <limits>\n#include <vector>
+#include <limits>
+#include <vector>
 
 namespace dxblas::detail {
 
@@ -281,6 +282,20 @@ HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<GpuTextur
 
     const UINT width = static_cast<UINT>(std::min<std::size_t>(count, 4096));
     const UINT height = static_cast<UINT>((count + width - 1u) / width);
+    HRESULT hr = acquire_matrix_float(width, height, out);
+    if (SUCCEEDED(hr)) out->count = count;
+    return hr;
+}
+
+HRESULT ArenaTexture::acquire_matrix_float(
+    UINT width, UINT height, std::shared_ptr<GpuTexture>& out)
+{
+    if (!device_ || width == 0 || height == 0 ||
+        width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+        return E_INVALIDARG;
+
+    const std::size_t count = static_cast<std::size_t>(width) * height;
     for (auto& slot : gpu_slots_) {
         if (slot.use_count() == 1 && slot->width == width && slot->height == height) {
             slot->count = count;
@@ -306,6 +321,18 @@ HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<GpuTextur
     if (FAILED(hr)) return hr;
     gpu_slots_.push_back(slot);
     out = std::move(slot);
+    return S_OK;
+}
+
+HRESULT ArenaTexture::upload_matrix_float(
+    ID3D11DeviceContext* context, const float* data, UINT width, UINT height,
+    std::shared_ptr<GpuTexture>& out)
+{
+    if (!context || !data || width == 0 || height == 0) return E_INVALIDARG;
+    HRESULT hr = acquire_matrix_float(width, height, out);
+    if (FAILED(hr)) return hr;
+    context->UpdateSubresource(out->texture.Get(), 0, nullptr, data,
+        width * static_cast<UINT>(sizeof(float)), 0);
     return S_OK;
 }
 

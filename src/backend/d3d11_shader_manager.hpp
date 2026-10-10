@@ -13,6 +13,7 @@ namespace dxblas::detail {
 enum class BinaryOp {
     Add,
     Mul,
+    Gemm,
 };
 
 struct ShaderKey {

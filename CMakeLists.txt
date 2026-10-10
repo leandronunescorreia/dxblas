@@ -23,11 +23,13 @@ add_library(dxblas
     src/backend/d3d11_shader_manager.cpp
     src/backend/d3d11_shader_manager.hpp
     src/shaders/sum.hlsl
-    src/shaders/mul.hlsl)
+    src/shaders/mul.hlsl
+    src/shaders/gemm.hlsl)
 
 set_source_files_properties(
     src/shaders/sum.hlsl
     src/shaders/mul.hlsl
+    src/shaders/gemm.hlsl
     PROPERTIES HEADER_FILE_ONLY TRUE)
 
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
@@ -99,4 +101,16 @@ if(dxBLAS_BUILD_EXAMPLE)
         PRIVATE
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
+
+    add_executable(dxblas_gemm examples/dxblas_gemm.cpp)
+    target_link_libraries(dxblas_gemm PRIVATE dxblas)
+    target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    # Also deploy editable HLSL beside the executable. Shader loading has an
+    # embedded fallback, so this is for development and runtime overrides.
+    add_custom_command(TARGET dxblas_gemm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+            "$<TARGET_FILE_DIR:dxblas_gemm>/shaders"
+        VERBATIM)
 endif()

@@ -60,6 +60,11 @@ public:
     HRESULT sum(DXGI_FORMAT format, const void* a, const void* b, void* out, std::size_t count);
     HRESULT mul(DXGI_FORMAT format, const void* a, const void* b, void* out, std::size_t count);
 
+    // Row-major single-precision matrix multiplication: C[M,N] = A[M,K] * B[K,N].
+    // This uses the D3D11 pixel-shader/render-to-texture path, not compute shaders.
+    HRESULT gemm(const float* a, const float* b, float* c,
+                 std::size_t m, std::size_t n, std::size_t k);
+
     // Typed convenience API. Type selection is per call, not per Context.
     template<class T>
     HRESULT sum(const std::vector<T>& a, const std::vector<T>& b, std::vector<T>& out)

@@ -62,6 +62,8 @@ public:
 
     HRESULT upload_float(ID3D11DeviceContext* context, const void* data, std::size_t count, std::shared_ptr<GpuTexture>& out);
     HRESULT acquire_float(std::size_t count, std::shared_ptr<GpuTexture>& out);
+    HRESULT acquire_matrix_float(UINT width, UINT height, std::shared_ptr<GpuTexture>& out);
+    HRESULT upload_matrix_float(ID3D11DeviceContext* context, const float* data, UINT width, UINT height, std::shared_ptr<GpuTexture>& out);
     HRESULT readback_float(ID3D11DeviceContext* context, const std::shared_ptr<GpuTexture>& source, void* destination, std::size_t count);
 
     UINT capacity_width() const noexcept { return capacity_width_; }

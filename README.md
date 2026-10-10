@@ -192,3 +192,23 @@ context.sum(ai, bi, ci); // R32_UINT shader variant
 The typed overloads map C++ element types through `dxblas::dxgi_format<T>`. The runtime-format overloads remain available for dynamically typed buffers. The shader manager specializes and caches concrete HLSL programs at runtime. Supported typed C++ mappings are `float`, `uint8_t`, `uint16_t`, `uint32_t`, `int8_t`, `int16_t`, and `int32_t`; corresponding DXGI formats are used. FP16 storage (`DXGI_FORMAT_R16_FLOAT`) is supported by the runtime-format API, but a standard C++17 `float16` type is not provided.
 
 Integer variants now return native `uint`/`int` shader outputs to compatible integer render targets instead of packing integer bytes into an UNORM texture. The GPU-resident `GpuArray` path remains float-only in this version; typed `std::vector` operations use the synchronous upload/execute/readback path.
+
+## GEMM matrix multiplication sample
+
+`dxblas_gemm` adds row-major FP32 GEMM using the existing D3D11 texture arena and a pixel shader. It computes `C[M,N] = A[M,K] * B[K,N]` using render-to-texture; it does **not** use Direct3D compute shaders, UAVs, or structured buffers.
+
+Build on Windows with the Windows SDK and CMake, then run:
+
+```powershell
+cmake -S . -B build -A x64
+cmake --build build --config Release --target dxblas_gemm
+.\build\Release\dxblas_gemm.exe
+```
+
+The sample defaults to a 4096 x 4096 square multiplication. An optional argument selects a smaller square size for smoke tests, for example `dxblas_gemm.exe 256`. It reports a multi-threaded CPU reference time and an end-to-end GPU time including texture uploads and result readback, and validates sampled output elements. The first shader compilation is warmed up before timing.
+
+**Performance note:** this first implementation is a straightforward pixel-shader GEMM, with one K-length dot product per output pixel and row-batched draws to reduce individual draw duration. It is a correctness/reference implementation rather than a tiled, compute-optimized GEMM. At 4096 x 4096 it can be slow and may be affected by Windows GPU timeout (TDR), depending on the GPU and driver. Run a smaller size first.
+
+### GEMM shader loading
+
+`dxblas_gemm` can run regardless of its process working directory: the GEMM HLSL has an embedded fallback. CMake also copies editable shaders beside the `dxblas_gemm` executable for development. If a shader is edited on disk, ensure the executable's working directory allows the runtime loader to find the corresponding `shaders/gemm.hlsl`; otherwise the embedded built-in shader is used.

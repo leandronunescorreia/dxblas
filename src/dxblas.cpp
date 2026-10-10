@@ -45,6 +45,12 @@ HRESULT Context::mul(
     return backend_ ? backend_->mul(format, a, b, out, count) : E_POINTER;
 }
 
+HRESULT Context::gemm(const float* a, const float* b, float* c,
+                      std::size_t m, std::size_t n, std::size_t k)
+{
+    return backend_ ? backend_->gemm(a, b, c, m, n, k) : E_POINTER;
+}
+
 
 HRESULT Context::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, GpuArray& out)
 {
