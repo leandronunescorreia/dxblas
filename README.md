@@ -137,3 +137,41 @@ cmake --build build
 .\build\dxblas_first_step.exe
 .\build\dxblas_big_array.exe
 ```
+
+## D3D11 pixel pipeline texture arena
+
+The D3D11 backend uses a persistent `ArenaTexture` owned by the backend context.
+The arena keeps reusable input SRVs, an output RTV texture, and a CPU-readable
+staging texture alive across operations. It grows when a requested operation
+does not fit and only reallocates when the format or capacity must change.
+
+Each operation therefore follows the hot path:
+
+1. `UpdateSubresource` the two input arrays into the persistent arena textures.
+2. Draw the fullscreen triangle and execute the pixel shader.
+3. `CopyResource` the persistent output texture into its staging texture.
+4. Map/read the staging texture back into the caller's C++ output buffer.
+
+No `ID3D11ComputeShader` or `Dispatch` is used.
+
+
+
+## GPU-resident arrays (pixel-shader backend)
+
+The context also exposes a GPU-resident path for `DXGI_FORMAT_R32_FLOAT`:
+
+```cpp
+dxblas::GpuArray a_gpu, b_gpu, tmp_gpu, result_gpu;
+context.upload_gpu(DXGI_FORMAT_R32_FLOAT, a.data(), count, a_gpu);
+context.upload_gpu(DXGI_FORMAT_R32_FLOAT, b.data(), count, b_gpu);
+context.sum_gpu(a_gpu, b_gpu, tmp_gpu);
+context.mul_gpu(tmp_gpu, b_gpu, result_gpu);
+context.readback_gpu(result_gpu, output.data(), count);
+```
+
+Uploads happen once, intermediate arrays remain in arena-managed textures, and
+readback is explicit. GPU-resident texture slots are reused after the last
+`GpuArray` handle releases them. The current GPU-resident API intentionally
+supports float32 only; the synchronous API retains the existing integer paths.
+The backend uses the classic D3D11 vertex/pixel-shader pipeline and never uses
+compute shaders or `Dispatch()`.

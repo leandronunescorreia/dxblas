@@ -45,6 +45,49 @@ HRESULT Context::mul(
     return backend_ ? backend_->mul(format, a, b, out, count) : E_POINTER;
 }
 
+
+HRESULT Context::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, GpuArray& out)
+{
+    if (!backend_) return E_POINTER;
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->upload_gpu(format, data, count, resource);
+    if (SUCCEEDED(hr)) out = GpuArray(std::move(resource), count, format);
+    return hr;
+}
+
+HRESULT Context::sum_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out)
+{
+    if (!backend_) return E_POINTER;
+    if (!a || !b || a.count_ != b.count_ || a.format_ != b.format_) return E_INVALIDARG;
+    const bool output_aliases_input =
+        out.resource_ && (out.resource_ == a.resource_ || out.resource_ == b.resource_);
+    if (!output_aliases_input) out = GpuArray{}; // release its old arena slot for reuse
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->sum_gpu(a.resource_, b.resource_, a.count_, resource);
+    if (SUCCEEDED(hr)) out = GpuArray(std::move(resource), a.count_, a.format_);
+    return hr;
+}
+
+HRESULT Context::mul_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out)
+{
+    if (!backend_) return E_POINTER;
+    if (!a || !b || a.count_ != b.count_ || a.format_ != b.format_) return E_INVALIDARG;
+    const bool output_aliases_input =
+        out.resource_ && (out.resource_ == a.resource_ || out.resource_ == b.resource_);
+    if (!output_aliases_input) out = GpuArray{}; // release its old arena slot for reuse
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->mul_gpu(a.resource_, b.resource_, a.count_, resource);
+    if (SUCCEEDED(hr)) out = GpuArray(std::move(resource), a.count_, a.format_);
+    return hr;
+}
+
+HRESULT Context::readback_gpu(const GpuArray& array, void* out, std::size_t count)
+{
+    if (!backend_) return E_POINTER;
+    if (!array || !out || count != array.count_) return E_INVALIDARG;
+    return backend_->readback_gpu(array.resource_, out, count);
+}
+
 IBackend* Context::backend() noexcept
 {
     return backend_.get();

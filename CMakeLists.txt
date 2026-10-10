@@ -18,6 +18,8 @@ option(dxBLAS_ENABLE_D3D11_DEBUG "Define D3D11 debug support for the library" OF
 add_library(dxblas
     src/dxblas.cpp
     src/d3d11_backend.cpp
+    src/backend/arena_texture.cpp
+    src/backend/arena_texture.hpp
     src/backend/d3d11_shader_manager.cpp
     src/backend/d3d11_shader_manager.hpp
     src/shaders/sum.hlsl
@@ -72,6 +74,17 @@ if(dxBLAS_BUILD_EXAMPLE)
         PRIVATE dxblas)
 
     target_compile_definitions(dxblas_big_array
+        PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX)
+
+    add_executable(dxblas_benchmark_2048
+        examples/benchmark_2048.cpp)
+
+    target_link_libraries(dxblas_benchmark_2048
+        PRIVATE dxblas)
+
+    target_compile_definitions(dxblas_benchmark_2048
         PRIVATE
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
