@@ -88,4 +88,15 @@ if(dxBLAS_BUILD_EXAMPLE)
         PRIVATE
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
+
+    add_executable(dxblas_typed_operations
+        examples/typed_operations.cpp)
+
+    target_link_libraries(dxblas_typed_operations
+        PRIVATE dxblas)
+
+    target_compile_definitions(dxblas_typed_operations
+        PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX)
 endif()

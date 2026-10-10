@@ -175,3 +175,20 @@ readback is explicit. GPU-resident texture slots are reused after the last
 supports float32 only; the synchronous API retains the existing integer paths.
 The backend uses the classic D3D11 vertex/pixel-shader pipeline and never uses
 compute shaders or `Dispatch()`.
+
+
+## Function-level typed operations
+
+`Context` is not templated. The C++17 typed convenience overloads select the element format per call, so one context can mix supported element types:
+
+```cpp
+std::vector<float> af{1.f, 2.f}, bf{3.f, 4.f}, cf;
+std::vector<std::uint32_t> ai{1, 2}, bi{3, 4}, ci;
+
+context.sum(af, bf, cf); // R32_FLOAT shader variant
+context.sum(ai, bi, ci); // R32_UINT shader variant
+```
+
+The typed overloads map C++ element types through `dxblas::dxgi_format<T>`. The runtime-format overloads remain available for dynamically typed buffers. The shader manager specializes and caches concrete HLSL programs at runtime. Supported typed C++ mappings are `float`, `uint8_t`, `uint16_t`, `uint32_t`, `int8_t`, `int16_t`, and `int32_t`; corresponding DXGI formats are used. FP16 storage (`DXGI_FORMAT_R16_FLOAT`) is supported by the runtime-format API, but a standard C++17 `float16` type is not provided.
+
+Integer variants now return native `uint`/`int` shader outputs to compatible integer render targets instead of packing integer bytes into an UNORM texture. The GPU-resident `GpuArray` path remains float-only in this version; typed `std::vector` operations use the synchronous upload/execute/readback path.

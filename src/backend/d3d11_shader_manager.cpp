@@ -36,33 +36,15 @@ constexpr const char* kSumPixelShaderSource = R"(
 #ifndef DTYPE
 #define DTYPE float
 #endif
-
 Texture2D<DTYPE> input_a : register(t0);
 Texture2D<DTYPE> input_b : register(t1);
-
-struct PSInput
-{
-    float4 position : SV_Position;
-};
-
-#ifdef INTEGER_OUTPUT
-float4 main(PSInput input) : SV_Target
-{
-    int2 pixel = int2(input.position.xy);
-    uint value = input_a.Load(int3(pixel, 0)) + input_b.Load(int3(pixel, 0));
-
-    return float4(
-        float(value & 0xffu),
-        float((value >> 8) & 0xffu),
-        float((value >> 16) & 0xffu),
-        float((value >> 24) & 0xffu)) / 255.0;
-}
+struct PSInput { float4 position : SV_Position; };
+#if defined(UNSIGNED_INTEGER_OUTPUT)
+uint main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))+input_b.Load(int3(p,0)); }
+#elif defined(SIGNED_INTEGER_OUTPUT)
+int main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))+input_b.Load(int3(p,0)); }
 #else
-DTYPE main(PSInput input) : SV_Target
-{
-    int2 pixel = int2(input.position.xy);
-    return input_a.Load(int3(pixel, 0)) + input_b.Load(int3(pixel, 0));
-}
+DTYPE main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))+input_b.Load(int3(p,0)); }
 #endif
 )";
 
@@ -70,33 +52,15 @@ constexpr const char* kMulPixelShaderSource = R"(
 #ifndef DTYPE
 #define DTYPE float
 #endif
-
 Texture2D<DTYPE> input_a : register(t0);
 Texture2D<DTYPE> input_b : register(t1);
-
-struct PSInput
-{
-    float4 position : SV_Position;
-};
-
-#ifdef INTEGER_OUTPUT
-float4 main(PSInput input) : SV_Target
-{
-    int2 pixel = int2(input.position.xy);
-    uint value = input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
-
-    return float4(
-        float(value & 0xffu),
-        float((value >> 8) & 0xffu),
-        float((value >> 16) & 0xffu),
-        float((value >> 24) & 0xffu)) / 255.0;
-}
+struct PSInput { float4 position : SV_Position; };
+#if defined(UNSIGNED_INTEGER_OUTPUT)
+uint main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))*input_b.Load(int3(p,0)); }
+#elif defined(SIGNED_INTEGER_OUTPUT)
+int main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))*input_b.Load(int3(p,0)); }
 #else
-DTYPE main(PSInput input) : SV_Target
-{
-    int2 pixel = int2(input.position.xy);
-    return input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
-}
+DTYPE main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return input_a.Load(int3(p,0))*input_b.Load(int3(p,0)); }
 #endif
 )";
 
@@ -107,6 +71,11 @@ const char* get_dtype_string(DXGI_FORMAT format)
     case DXGI_FORMAT_R16_UINT:
     case DXGI_FORMAT_R32_UINT:
         return "uint";
+    case DXGI_FORMAT_R8_SINT:
+    case DXGI_FORMAT_R16_SINT:
+    case DXGI_FORMAT_R32_SINT:
+        return "int";
+    case DXGI_FORMAT_R16_FLOAT:
     case DXGI_FORMAT_R32_FLOAT:
         return "float";
     default:
@@ -210,7 +179,7 @@ HRESULT D3D11ShaderManager::get_or_compile(
     if (!device)
         return E_POINTER;
 
-    const ShaderKey key{op, format};
+    const ShaderKey key{op, format, format};
     auto it = pixel_cache_.find(key);
     if (it != pixel_cache_.end()) {
         out_shader = it->second;
@@ -230,14 +199,19 @@ HRESULT D3D11ShaderManager::get_or_compile(
         return E_FAIL;
     }
 
-    const bool integer_output = format == DXGI_FORMAT_R8_UINT ||
-                                 format == DXGI_FORMAT_R16_UINT ||
-                                 format == DXGI_FORMAT_R32_UINT;
+    const bool unsigned_integer = format == DXGI_FORMAT_R8_UINT ||
+                                  format == DXGI_FORMAT_R16_UINT ||
+                                  format == DXGI_FORMAT_R32_UINT;
+    const bool signed_integer = format == DXGI_FORMAT_R8_SINT ||
+                                format == DXGI_FORMAT_R16_SINT ||
+                                format == DXGI_FORMAT_R32_SINT;
 
     D3D_SHADER_MACRO defines[3]{};
     defines[0] = {"DTYPE", dtype};
-    if (integer_output)
-        defines[1] = {"INTEGER_OUTPUT", "1"};
+    if (unsigned_integer)
+        defines[1] = {"UNSIGNED_INTEGER_OUTPUT", "1"};
+    else if (signed_integer)
+        defines[1] = {"SIGNED_INTEGER_OUTPUT", "1"};
 
     Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
     HRESULT hr = compile_shader(

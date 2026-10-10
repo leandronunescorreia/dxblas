@@ -19,23 +19,28 @@ namespace {
 
 struct FormatInfo {
     UINT bytes_per_element;
-    bool integer;
 };
 
 HRESULT get_format_info(DXGI_FORMAT format, FormatInfo& info)
 {
     switch (format) {
     case DXGI_FORMAT_R8_UINT:
-        info = {1, true};
+    case DXGI_FORMAT_R8_SINT:
+        info = {1};
         return S_OK;
     case DXGI_FORMAT_R16_UINT:
-        info = {2, true};
+    case DXGI_FORMAT_R16_SINT:
+        info = {2};
+        return S_OK;
+    case DXGI_FORMAT_R16_FLOAT:
+        info = {2};
         return S_OK;
     case DXGI_FORMAT_R32_UINT:
-        info = {4, true};
+    case DXGI_FORMAT_R32_SINT:
+        info = {4};
         return S_OK;
     case DXGI_FORMAT_R32_FLOAT:
-        info = {4, false};
+        info = {4};
         return S_OK;
     default:
         return E_INVALIDARG;
@@ -199,8 +204,9 @@ public:
                 (tile_elements + width - 1u) / width);
 
             const UINT row_pitch = width * info.bytes_per_element;
-            const DXGI_FORMAT output_format =
-                info.integer ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
+            // Integer render targets use native integer formats and integer
+            // pixel-shader signatures; no UNORM byte-packing is required.
+            const DXGI_FORMAT output_format = format;
 
             hr = arena_texture.ensure(
                 format, output_format, width, height);
@@ -239,7 +245,7 @@ public:
                 height,
                 static_cast<UINT>(tile_elements),
                 info.bytes_per_element,
-                info.integer);
+                false);
             if (FAILED(hr))
                 return hr;
 

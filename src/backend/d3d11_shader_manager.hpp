@@ -17,11 +17,13 @@ enum class BinaryOp {
 
 struct ShaderKey {
     BinaryOp op;
-    DXGI_FORMAT format;
+    DXGI_FORMAT input_format;
+    DXGI_FORMAT output_format;
 
     bool operator==(const ShaderKey& other) const noexcept
     {
-        return op == other.op && format == other.format;
+        return op == other.op && input_format == other.input_format &&
+               output_format == other.output_format;
     }
 };
 
@@ -53,7 +55,9 @@ private:
     struct ShaderKeyHash {
         std::size_t operator()(const ShaderKey& key) const noexcept
         {
-            return (static_cast<std::size_t>(key.op) << 16) ^ static_cast<std::size_t>(key.format);
+            return (static_cast<std::size_t>(key.op) << 24) ^
+                (static_cast<std::size_t>(key.input_format) << 8) ^
+                static_cast<std::size_t>(key.output_format);
         }
     };
 
