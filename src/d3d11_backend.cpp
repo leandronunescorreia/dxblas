@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <wrl/client.h>
+#include <dxgi1_4.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -97,10 +98,46 @@ public:
 
         feature_level = created_level;
 
-        // The arena is context-owned and lives for the lifetime of the backend.
-        // Its first allocation is deliberately modest; ensure() grows it only
-        // when an operation actually needs more texture space.
-        return arena_texture.initialize(device.Get(), 2048, 1);
+        return initialize_texture_arena();
+    }
+
+
+    // Query device/adapter capabilities separately from resource creation so
+    // the sizing policy can be reviewed and adjusted without touching setup.
+    UINT query_arena_texture_dimension()
+    {
+        UINT dimension = 1024;
+        const UINT device_limit = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+
+        ComPtr<IDXGIDevice> dxgi_device;
+        ComPtr<IDXGIAdapter> adapter;
+        if (SUCCEEDED(device.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+            ComPtr<IDXGIAdapter3> adapter3;
+            if (SUCCEEDED(adapter.As(&adapter3))) {
+                DXGI_QUERY_VIDEO_MEMORY_INFO memory_info{};
+                if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory_info))) {
+                    const UINT64 available = memory_info.Budget > memory_info.CurrentUsage
+                        ? memory_info.Budget - memory_info.CurrentUsage : 0;
+                    if (available >= (UINT64{1024} * 1024 * 1024)) dimension = 4096;
+                    else if (available >= (UINT64{256} * 1024 * 1024)) dimension = 2048;
+                }
+            }
+        }
+        return std::min(dimension, device_limit);
+    }
+
+    HRESULT initialize_texture_arena()
+    {
+        const UINT preferred = query_arena_texture_dimension();
+        const UINT device_limit = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+        for (UINT candidate : {preferred, 2048u, 1024u}) {
+            candidate = std::min(candidate, device_limit);
+            if (candidate == 0) continue;
+            const HRESULT hr = arena_texture.initialize(device.Get(), candidate, candidate);
+            if (SUCCEEDED(hr)) return S_OK;
+            if (candidate == 1024u) return hr;
+        }
+        return E_FAIL;
     }
 
     HRESULT compile_shaders(
@@ -290,6 +327,111 @@ public:
         context->VSSetShader(nullptr, nullptr, 0);
         context->OMSetRenderTargets(0, nullptr, nullptr);
         return S_OK;
+    }
+
+    HRESULT create_copy_texture(DXGI_FORMAT format, const void* data, std::size_t count,
+                                std::shared_ptr<GpuTexture>& out)
+    {
+        if (count == 0) return E_INVALIDARG;
+        FormatInfo info{};
+        HRESULT hr = get_format_info(format, info);
+        if (FAILED(hr)) return hr;
+        const UINT max_dimension = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+        const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dimension));
+        const std::size_t height_size = (count + width - 1u) / width;
+        if (height_size > max_dimension) return E_INVALIDARG;
+        const UINT height = static_cast<UINT>(height_size);
+
+        auto texture = std::make_shared<GpuTexture>();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        hr = device->CreateTexture2D(&desc, nullptr, &texture->texture);
+        if (FAILED(hr)) return hr;
+        hr = device->CreateShaderResourceView(texture->texture.Get(), nullptr, &texture->srv);
+        if (FAILED(hr)) return hr;
+        hr = device->CreateRenderTargetView(texture->texture.Get(), nullptr, &texture->rtv);
+        if (FAILED(hr)) return hr;
+
+        if (data) {
+            const std::size_t capacity = static_cast<std::size_t>(width) * height;
+            std::vector<std::uint8_t> padded(capacity * info.bytes_per_element, 0);
+            std::memcpy(padded.data(), data, count * info.bytes_per_element);
+            context->UpdateSubresource(texture->texture.Get(), 0, nullptr, padded.data(),
+                width * info.bytes_per_element, 0);
+        }
+        texture->width = width;
+        texture->height = height;
+        texture->count = count;
+        out = std::move(texture);
+        return S_OK;
+    }
+
+    HRESULT copy_gpu(DXGI_FORMAT format, const void* a, const void* b, std::size_t count,
+                     std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b,
+                     std::shared_ptr<void>& gpu_out)
+    {
+        if (!a || !b || count == 0) return E_INVALIDARG;
+        std::shared_ptr<GpuTexture> texture_a, texture_b, texture_out;
+        HRESULT hr = create_copy_texture(format, a, count, texture_a);
+        if (FAILED(hr)) return hr;
+        hr = create_copy_texture(format, b, count, texture_b);
+        if (FAILED(hr)) return hr;
+        hr = create_copy_texture(format, nullptr, count, texture_out);
+        if (FAILED(hr)) return hr;
+        gpu_a = std::move(texture_a);
+        gpu_b = std::move(texture_b);
+        gpu_out = std::move(texture_out);
+        return S_OK;
+    }
+
+    HRESULT readback_copy_gpu(const std::shared_ptr<void>& opaque, void* out, std::size_t count)
+    {
+        if (!opaque || !out || count == 0) return E_INVALIDARG;
+        auto texture = std::static_pointer_cast<GpuTexture>(opaque);
+        if (count > texture->count) return E_INVALIDARG;
+
+        D3D11_TEXTURE2D_DESC source_desc{};
+        texture->texture->GetDesc(&source_desc);
+        FormatInfo info{};
+        HRESULT hr = get_format_info(source_desc.Format, info);
+        if (FAILED(hr)) return hr;
+
+        D3D11_TEXTURE2D_DESC staging_desc = source_desc;
+        staging_desc.Usage = D3D11_USAGE_STAGING;
+        staging_desc.BindFlags = 0;
+        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        staging_desc.MiscFlags = 0;
+        staging_desc.SampleDesc.Count = 1;
+        staging_desc.SampleDesc.Quality = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        hr = device->CreateTexture2D(&staging_desc, nullptr, &staging);
+        if (FAILED(hr)) return hr;
+        context->CopyResource(staging.Get(), texture->texture.Get());
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+        if (FAILED(hr)) return hr;
+        const std::size_t row_elements = texture->width;
+        const std::size_t elements_per_row = std::min(count, row_elements);
+        auto* destination = static_cast<std::uint8_t*>(out);
+        const auto* source = static_cast<const std::uint8_t*>(mapped.pData);
+        std::size_t remaining = count;
+        for (UINT row = 0; remaining != 0 && row < texture->height; ++row) {
+            const std::size_t row_count = std::min(remaining, elements_per_row);
+            std::memcpy(destination, source + static_cast<std::size_t>(row) * mapped.RowPitch,
+                        row_count * info.bytes_per_element);
+            destination += row_count * info.bytes_per_element;
+            remaining -= row_count;
+        }
+        context->Unmap(staging.Get(), 0);
+        return remaining == 0 ? S_OK : E_FAIL;
     }
 
     HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out)
@@ -485,9 +627,20 @@ HRESULT D3D11Backend::gemm(const float* a, const float* b, float* c,
 }
 
 
+HRESULT D3D11Backend::readback_copy_gpu(const std::shared_ptr<void>& array, void* out, std::size_t count)
+{
+    return impl_->readback_copy_gpu(array, out, count);
+}
+
 HRESULT D3D11Backend::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out)
 {
     return impl_->upload_gpu(format, data, count, out);
+}
+HRESULT D3D11Backend::copy_gpu(DXGI_FORMAT format, const void* a, const void* b, std::size_t count,
+                               std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b,
+                               std::shared_ptr<void>& gpu_out)
+{
+    return impl_->copy_gpu(format, a, b, count, gpu_a, gpu_b, gpu_out);
 }
 HRESULT D3D11Backend::sum_gpu(const std::shared_ptr<void>& a, const std::shared_ptr<void>& b, std::size_t count, std::shared_ptr<void>& out)
 {
