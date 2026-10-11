@@ -65,6 +65,24 @@ HRESULT create_rtv(
 // Upload a tightly packed CPU array without building a padded temporary buffer.
 // UpdateSubresource reads only the source region described by each box, so the
 // final partial row never reads beyond the caller's allocation.
+HRESULT layout_1d_with_max_width(
+    std::size_t count, UINT max_width, Layout1D& out)
+{
+    if (count == 0 || max_width == 0) return E_INVALIDARG;
+
+    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+    max_width = std::min(max_width, max_dim);
+    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_width));
+    if (width == 0) return E_INVALIDARG;
+
+    const std::size_t height = count / width + (count % width != 0 ? 1u : 0u);
+    if (height == 0 || height > max_dim) return E_INVALIDARG;
+
+    out.width = width;
+    out.height = static_cast<UINT>(height);
+    return S_OK;
+}
+
 void upload_contiguous_rows(
     ID3D11DeviceContext* context,
     ID3D11Texture2D* texture,
@@ -99,6 +117,31 @@ void upload_contiguous_rows(
 }
 
 } // namespace
+
+UINT bytes_per_element(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_R8_UINT:
+    case DXGI_FORMAT_R8_SINT:
+        return 1;
+    case DXGI_FORMAT_R16_UINT:
+    case DXGI_FORMAT_R16_SINT:
+    case DXGI_FORMAT_R16_FLOAT:
+        return 2;
+    case DXGI_FORMAT_R32_UINT:
+    case DXGI_FORMAT_R32_SINT:
+    case DXGI_FORMAT_R32_FLOAT:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+HRESULT layout_1d(std::size_t count, Layout1D& out)
+{
+    return layout_1d_with_max_width(
+        count, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION), out);
+}
 
 HRESULT ArenaTexture::initialize(
     ID3D11Device* device,
@@ -365,9 +408,10 @@ HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<gpuMemBas
                 static_cast<std::size_t>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION))
         return E_INVALIDARG;
 
-    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, 4096));
-    const UINT height = static_cast<UINT>((count + width - 1u) / width);
-    HRESULT hr = acquire_matrix_float(width, height, out);
+    Layout1D layout{};
+    HRESULT hr = layout_1d_with_max_width(count, 4096u, layout);
+    if (FAILED(hr)) return hr;
+    hr = acquire_matrix_float(layout.width, layout.height, out);
     if (SUCCEEDED(hr)) out->count = count;
     return hr;
 }
@@ -476,22 +520,10 @@ HRESULT ArenaTexture::readback_float(
 }
 
 
-namespace {
-UINT gpu_mem_bytes(DXGI_FORMAT format)
-{
-    switch (format) {
-    case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SINT: return 1;
-    case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16_SINT: case DXGI_FORMAT_R16_FLOAT: return 2;
-    case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: return 4;
-    default: return 0;
-    }
-}
-}
-
 HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, std::size_t count)
 {
     if (!device_ || count == 0) return E_INVALIDARG;
-    const UINT bytes = gpu_mem_bytes(format);
+    const UINT bytes = bytes_per_element(format);
     if (!bytes) return E_INVALIDARG;
     const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
     // Preserve a caller-provided matrix shape when it can contain the payload;
@@ -500,10 +532,11 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     UINT height = memory.height;
     if (width == 0 || height == 0 || width > max_dim || height > max_dim ||
         static_cast<std::size_t>(width) * height < count || memory.storage_format != format) {
-        width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
-        const std::size_t height_size = (count + width - 1u) / width;
-        if (height_size == 0 || height_size > max_dim) return E_INVALIDARG;
-        height = static_cast<UINT>(height_size);
+        Layout1D layout{};
+        const HRESULT layout_hr = layout_1d(count, layout);
+        if (FAILED(layout_hr)) return layout_hr;
+        width = layout.width;
+        height = layout.height;
     }
 
     // Reuse the GPU texture and views when format and dimensions match. Staging
@@ -571,7 +604,7 @@ HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& m
     if (!context || !data || count == 0) return E_INVALIDARG;
     HRESULT hr = prepare_gpu_mem(memory, memory.storage_format, count);
     if (FAILED(hr)) return hr;
-    const UINT bytes = gpu_mem_bytes(memory.storage_format);
+    const UINT bytes = bytes_per_element(memory.storage_format);
     upload_contiguous_rows(context, memory.texture.Get(), data, count,
         memory.width, memory.height, bytes);
     return S_OK;
@@ -625,7 +658,7 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
     D3D11_MAPPED_SUBRESOURCE mapped{};
     hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
-    const UINT bytes = gpu_mem_bytes(memory.storage_format);
+    const UINT bytes = bytes_per_element(memory.storage_format);
     if (!bytes) { context->Unmap(shared_staging_.Get(), 0); return E_INVALIDARG; }
     auto* dst = static_cast<std::uint8_t*>(out);
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
@@ -675,7 +708,7 @@ HRESULT ArenaTexture::readback_gpu_mem_batch(
             request.source->height == 0)
             return E_INVALIDARG;
 
-        const UINT bytes = gpu_mem_bytes(request.source->storage_format);
+        const UINT bytes = bytes_per_element(request.source->storage_format);
         if (bytes == 0) return E_INVALIDARG;
 
         const UINT copied_width = static_cast<UINT>(
@@ -749,30 +782,26 @@ HRESULT ArenaTexture::create_gpu_buffer(
     std::size_t count, std::shared_ptr<gpuMemBase>& out)
 {
     if (!context || count == 0) return E_INVALIDARG;
-    UINT bytes = 0;
-    switch (format) {
-    case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SINT: bytes = 1; break;
-    case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16_SINT: case DXGI_FORMAT_R16_FLOAT: bytes = 2; break;
-    case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: bytes = 4; break;
-    default: return E_INVALIDARG;
-    }
-    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
-    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
-    const std::size_t h = (count + width - 1u) / width;
-    if (h > max_dim) return E_INVALIDARG;
+    const UINT bytes = bytes_per_element(format);
+    if (bytes == 0) return E_INVALIDARG;
+    Layout1D layout{};
+    HRESULT hr = layout_1d(count, layout);
+    if (FAILED(hr)) return hr;
+    const UINT width = layout.width;
+    const UINT height = layout.height;
     auto texture = std::make_shared<gpuMemBase>();
-    HRESULT hr = create_texture(device_.Get(), width, static_cast<UINT>(h), format,
+    hr = create_texture(device_.Get(), width, height, format,
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0, texture->texture);
     if (FAILED(hr)) return hr;
     hr = create_srv(device_.Get(), texture->texture.Get(), format, texture->srv);
     if (FAILED(hr)) return hr;
     hr = create_rtv(device_.Get(), texture->texture.Get(), format, texture->rtv);
     if (FAILED(hr)) return hr;
-    texture->width = width; texture->height = static_cast<UINT>(h); texture->count = count;
+    texture->width = width; texture->height = height; texture->count = count;
     texture->storage_format = format;
     if (data) {
         upload_contiguous_rows(context, texture->texture.Get(), data, count,
-            width, static_cast<UINT>(h), bytes);
+            width, height, bytes);
     }
     out = std::move(texture);
     return S_OK;

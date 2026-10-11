@@ -118,13 +118,8 @@ public:
     HRESULT binary_op(BinaryOp op, DXGI_FORMAT format, const void* a, const void* b, void* out, std::size_t count)
     {
         if (!a || !b || !out || count == 0) return E_INVALIDARG;
-        UINT bytes = 0;
-        switch (format) {
-        case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SINT: bytes = 1; break;
-        case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16_SINT: case DXGI_FORMAT_R16_FLOAT: bytes = 2; break;
-        case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: bytes = 4; break;
-        default: return E_INVALIDARG;
-        }
+        const UINT bytes = bytes_per_element(format);
+        if (bytes == 0) return E_INVALIDARG;
         ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11PixelShader> ps;
         HRESULT hr = compile_shaders(op, format, vs, ps);
         if (FAILED(hr)) return hr;

@@ -11,6 +11,15 @@
 
 namespace dxblas::detail {
 
+UINT bytes_per_element(DXGI_FORMAT format);
+
+struct Layout1D {
+    UINT width;
+    UINT height;
+};
+
+HRESULT layout_1d(std::size_t count, Layout1D& out);
+
 class ArenaTexture final {
 public:
     ArenaTexture() = default;
