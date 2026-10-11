@@ -102,6 +102,7 @@ private:
     DXGI_FORMAT output_format_ = DXGI_FORMAT_UNKNOWN;
     UINT capacity_width_ = 0;
     UINT capacity_height_ = 0;
+    UINT max_dimension_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     std::vector<std::shared_ptr<gpuMemBase>> gpu_slots_;
 };
 
