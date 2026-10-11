@@ -72,45 +72,51 @@ HRESULT ArenaTexture::initialize(
     if (!device || initial_width == 0 || initial_height == 0)
         return E_INVALIDARG;
 
-    // Initialization records device capabilities only. GPU resources are created
-    // on demand by ensure() for the first actual operation.
     device_ = device;
-    switch (device->GetFeatureLevel()) {
-    case D3D_FEATURE_LEVEL_11_1:
-    case D3D_FEATURE_LEVEL_11_0:
-        max_dimension_ = 16384;
-        break;
-    case D3D_FEATURE_LEVEL_10_1:
-    case D3D_FEATURE_LEVEL_10_0:
-        max_dimension_ = 8192;
-        break;
-    case D3D_FEATURE_LEVEL_9_3:
-        max_dimension_ = 4096;
-        break;
-    case D3D_FEATURE_LEVEL_9_2:
-    case D3D_FEATURE_LEVEL_9_1:
-        max_dimension_ = 2048;
-        break;
-    default:
-        max_dimension_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
-        break;
-    }
 
-    // Retain the parameters for API compatibility and reject unsupported sizes,
-    // but do not allocate or prewarm anything here.
-    if (initial_width > max_dimension_ || initial_height > max_dimension_)
-        return E_INVALIDARG;
-    return S_OK;
+    // Reserve the first arena as a common float working set. Other formats
+    // are lazily promoted/reallocated by ensure() when first used.
+    HRESULT hr = ensure(
+        DXGI_FORMAT_R32_FLOAT,
+        DXGI_FORMAT_R32_FLOAT,
+        initial_width,
+        initial_height);
+    if (FAILED(hr)) return hr;
+
+    // Prewarm one GPU-resident slot during Context::initialize().
+    std::shared_ptr<gpuMemBase> initial_slot;
+    hr = acquire_float(static_cast<std::size_t>(initial_width) * initial_height, initial_slot);
+    initial_slot.reset(); // return it to the arena pool for the first operation
+    return hr;
 }
 
 HRESULT ArenaTexture::initialize_adaptive(ID3D11Device* device)
 {
     if (!device) return E_INVALIDARG;
-
-    // Do not allocate based on the adapter's memory budget at startup. The
-    // budget is shared with other applications and is not a reliable estimate
-    // of a safe single allocation. ensure() allocates only the requested region.
-    return initialize(device, 1, 1);
+    UINT preferred = 1024;
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
+        SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
+        SUCCEEDED(adapter.As(&adapter3))) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+            const UINT64 available = info.Budget > info.CurrentUsage ? info.Budget - info.CurrentUsage : 0;
+            if (available >= (UINT64{1024} * 1024 * 1024)) preferred = 4096;
+            else if (available >= (UINT64{256} * 1024 * 1024)) preferred = 2048;
+        }
+    }
+    preferred = std::min(preferred, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+    HRESULT last = E_FAIL;
+    for (UINT candidate : {preferred, 2048u, 1024u}) {
+        candidate = std::min(candidate, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+        if (!candidate) continue;
+        last = initialize(device, candidate, candidate);
+        if (SUCCEEDED(last)) return S_OK;
+        if (candidate == 1024u) break;
+    }
+    return last;
 }
 
 HRESULT ArenaTexture::ensure(
@@ -119,8 +125,7 @@ HRESULT ArenaTexture::ensure(
     UINT width,
     UINT height)
 {
-    if (!device_ || width == 0 || height == 0 ||
-        width > max_dimension_ || height > max_dimension_)
+    if (!device_ || width == 0 || height == 0)
         return E_INVALIDARG;
 
     const bool format_matches =
@@ -131,15 +136,35 @@ HRESULT ArenaTexture::ensure(
         capacity_width_ >= width &&
         capacity_height_ >= height;
 
-    // Reuse existing resources when both format and requested dimensions fit.
     if (format_matches && capacity_matches)
         return S_OK;
 
-    // Allocate exactly for this request. In particular, a format change must
-    // not preserve a previous 4096x4096 capacity when the new format only needs
-    // a small buffer. allocate() builds a complete replacement before swapping
-    // resources, so a failed allocation leaves the previous arena usable.
-    return allocate(input_format, output_format, width, height);
+    // Grow geometrically. The old resources stay alive until all commands
+    // referencing them are complete; D3D11 keeps the command stream valid.
+    UINT new_width = std::max(width, capacity_width_);
+    UINT new_height = std::max(height, capacity_height_);
+
+    if (new_width == 0)
+        new_width = width;
+    if (new_height == 0)
+        new_height = height;
+
+    if (format_matches) {
+        new_width = std::max(new_width, capacity_width_ * 2u);
+        new_height = std::max(new_height, capacity_height_ * 2u);
+    } else {
+        new_width = std::max(new_width, 2048u);
+        new_height = std::max(new_height, height);
+    }
+
+    // Never exceed D3D11's Texture2D dimension limit.
+    new_width = std::min(new_width, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+    new_height = std::min(new_height, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+
+    if (new_width < width || new_height < height)
+        return E_INVALIDARG;
+
+    return allocate(input_format, output_format, new_width, new_height);
 }
 
 HRESULT ArenaTexture::allocate(
@@ -290,11 +315,11 @@ HRESULT ArenaTexture::readback(
 HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<gpuMemBase>& out)
 {
     if (!device_ || count == 0 ||
-        count > static_cast<std::size_t>(max_dimension_) *
-                static_cast<std::size_t>(max_dimension_))
+        count > static_cast<std::size_t>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) *
+                static_cast<std::size_t>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION))
         return E_INVALIDARG;
 
-    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dimension_));
+    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, 4096));
     const UINT height = static_cast<UINT>((count + width - 1u) / width);
     HRESULT hr = acquire_matrix_float(width, height, out);
     if (SUCCEEDED(hr)) out->count = count;
@@ -305,8 +330,8 @@ HRESULT ArenaTexture::acquire_matrix_float(
     UINT width, UINT height, std::shared_ptr<gpuMemBase>& out)
 {
     if (!device_ || width == 0 || height == 0 ||
-        width > max_dimension_ ||
-        height > max_dimension_)
+        width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
         return E_INVALIDARG;
 
     const std::size_t count = static_cast<std::size_t>(width) * height;
@@ -322,12 +347,10 @@ HRESULT ArenaTexture::acquire_matrix_float(
     slot->width = width;
     slot->height = height;
     slot->count = count;
+    slot->storage_format = DXGI_FORMAT_R32_FLOAT;
     HRESULT hr = create_texture(device_.Get(), width, height, DXGI_FORMAT_R32_FLOAT,
         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
         D3D11_USAGE_DEFAULT, 0, slot->texture);
-    if (FAILED(hr)) return hr;
-    hr = create_texture(device_.Get(), width, height, DXGI_FORMAT_R32_FLOAT,
-        0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, slot->staging);
     if (FAILED(hr)) return hr;
     hr = create_srv(device_.Get(), slot->texture.Get(), DXGI_FORMAT_R32_FLOAT, slot->srv);
     if (FAILED(hr)) return hr;
@@ -376,32 +399,35 @@ HRESULT ArenaTexture::readback_float(
     void* destination, std::size_t count)
 {
     if (!context || !source || !destination || count != source->count ||
-        !source->staging || !source->texture || count == 0 || source->width == 0)
+        !source->texture || count == 0 || source->width == 0)
         return E_INVALIDARG;
 
     const UINT rows = static_cast<UINT>((count + source->width - 1u) / source->width);
     const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, source->width));
+    HRESULT hr = ensure_readback_staging(source->storage_format == DXGI_FORMAT_UNKNOWN
+        ? DXGI_FORMAT_R32_FLOAT : source->storage_format, copied_width, rows);
+    if (FAILED(hr)) return hr;
+
     const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
     context->CopySubresourceRegion(
-        source->staging.Get(), 0, 0, 0, 0, source->texture.Get(), 0, &used_region);
+        gpu_mem_staging_.Get(), 0, 0, 0, 0, source->texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    HRESULT hr = context->Map(source->staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->Map(gpu_mem_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
 
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
     auto* dst = static_cast<std::uint8_t*>(destination);
     std::size_t copied = 0;
-    for (UINT y = 0; y < source->height && copied < count; ++y) {
+    for (UINT y = 0; y < rows && copied < count; ++y) {
         const std::size_t row_count = std::min<std::size_t>(source->width, count - copied);
         std::memcpy(dst + copied * sizeof(float),
                     src + static_cast<std::size_t>(y) * mapped.RowPitch,
                     row_count * sizeof(float));
         copied += row_count;
     }
-    context->Unmap(source->staging.Get(), 0);
-    return S_OK;
+    context->Unmap(gpu_mem_staging_.Get(), 0);
+    return copied == count ? S_OK : E_FAIL;
 }
-
 
 
 namespace {
@@ -421,32 +447,28 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     if (!device_ || count == 0) return E_INVALIDARG;
     const UINT bytes = gpu_mem_bytes(format);
     if (!bytes) return E_INVALIDARG;
-    const UINT max_dim = max_dimension_;
+    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
     // Preserve a caller-provided matrix shape when it can contain the payload;
     // otherwise use the standard contiguous 1D-array packing.
     UINT width = memory.width;
     UINT height = memory.height;
     if (width == 0 || height == 0 || width > max_dim || height > max_dim ||
-        static_cast<std::size_t>(width) * height < count) {
+        static_cast<std::size_t>(width) * height < count || memory.storage_format != format) {
         width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
         const std::size_t height_size = (count + width - 1u) / width;
         if (height_size == 0 || height_size > max_dim) return E_INVALIDARG;
         height = static_cast<UINT>(height_size);
     }
 
-    // Keep existing resources when the requested format and resolved texture
-    // shape are unchanged. Uploads happen repeatedly for the same gpuMem object;
-    // recreating its texture, views and staging resource on every upload adds
-    // avoidable driver and allocation overhead.
-    if (memory.storage_format == format &&
-        memory.width == width && memory.height == height &&
-        memory.texture && memory.staging && memory.srv && memory.rtv) {
+    // Reuse the GPU texture and views when format and dimensions match. Staging
+    // is deliberately not owned by gpuMem; the context shares one readback target.
+    if (memory.storage_format == format && memory.width == width && memory.height == height &&
+        memory.texture && memory.srv && memory.rtv) {
         memory.count = count;
         return S_OK;
     }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
     HRESULT hr = create_texture(device_.Get(), width, height, format,
@@ -456,12 +478,8 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     if (FAILED(hr)) return hr;
     hr = create_rtv(device_.Get(), texture.Get(), format, rtv);
     if (FAILED(hr)) return hr;
-    hr = create_texture(device_.Get(), width, height, format, 0,
-        D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
-    if (FAILED(hr)) return hr;
 
     memory.texture = std::move(texture);
-    memory.staging = std::move(staging);
     memory.srv = std::move(srv);
     memory.rtv = std::move(rtv);
     memory.width = width;
@@ -470,7 +488,6 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     memory.storage_format = format;
     return S_OK;
 }
-
 HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory,
                                      const void* data, std::size_t count)
 {
@@ -493,37 +510,68 @@ HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& m
     return S_OK;
 }
 
+HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UINT height)
+{
+    if (!device_ || format == DXGI_FORMAT_UNKNOWN || width == 0 || height == 0)
+        return E_INVALIDARG;
+
+    const bool reusable = gpu_mem_staging_ && gpu_mem_staging_format_ == format &&
+        gpu_mem_staging_width_ >= width && gpu_mem_staging_height_ >= height;
+    if (reusable) return S_OK;
+
+    // Grow monotonically for a given format. A format change requires a new
+    // staging texture, but retains the largest dimensions already requested.
+    UINT allocation_width = width;
+    UINT allocation_height = height;
+    if (gpu_mem_staging_format_ == format) {
+        allocation_width = std::max(allocation_width, gpu_mem_staging_width_);
+        allocation_height = std::max(allocation_height, gpu_mem_staging_height_);
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    HRESULT hr = create_texture(device_.Get(), allocation_width, allocation_height, format,
+        0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
+    if (FAILED(hr)) return hr;
+
+    gpu_mem_staging_ = std::move(staging);
+    gpu_mem_staging_format_ = format;
+    gpu_mem_staging_width_ = allocation_width;
+    gpu_mem_staging_height_ = allocation_height;
+    return S_OK;
+}
+
 HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory,
                                        void* out, std::size_t count)
 {
-    if (!context || !memory.texture.Get() || !memory.staging.Get() || !out ||
-        count == 0 || count > memory.count || memory.width == 0)
+    if (!context || !memory.texture.Get() || !out || count == 0 ||
+        count > memory.count || memory.width == 0 || memory.height == 0)
         return E_INVALIDARG;
 
-    // Transfer only rows containing live elements; do not copy the entire arena.
     const UINT rows = static_cast<UINT>((count + memory.width - 1u) / memory.width);
     const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, memory.width));
+    HRESULT hr = ensure_readback_staging(memory.storage_format, copied_width, rows);
+    if (FAILED(hr)) return hr;
+
     const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
     context->CopySubresourceRegion(
-        memory.staging.Get(), 0, 0, 0, 0, memory.texture.Get(), 0, &used_region);
+        gpu_mem_staging_.Get(), 0, 0, 0, 0, memory.texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    HRESULT hr = context->Map(memory.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->Map(gpu_mem_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
     const UINT bytes = gpu_mem_bytes(memory.storage_format);
-    if (!bytes) { context->Unmap(memory.staging.Get(), 0); return E_INVALIDARG; }
+    if (!bytes) { context->Unmap(gpu_mem_staging_.Get(), 0); return E_INVALIDARG; }
     auto* dst = static_cast<std::uint8_t*>(out);
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
     std::size_t remaining = count;
-    for (UINT row = 0; remaining && row < memory.height; ++row) {
+    for (UINT row = 0; remaining && row < rows; ++row) {
         const std::size_t n = std::min<std::size_t>(remaining, memory.width);
         std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, n * bytes);
         dst += n * bytes;
         remaining -= n;
     }
-    context->Unmap(memory.staging.Get(), 0);
+    context->Unmap(gpu_mem_staging_.Get(), 0);
     return remaining == 0 ? S_OK : E_FAIL;
 }
-
 HRESULT ArenaTexture::copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a,
                                              gpuMemBase& b, gpuMemBase& out, std::size_t count)
 {
@@ -548,7 +596,7 @@ HRESULT ArenaTexture::create_gpu_buffer(
     case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: bytes = 4; break;
     default: return E_INVALIDARG;
     }
-    const UINT max_dim = max_dimension_;
+    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
     const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
     const std::size_t h = (count + width - 1u) / width;
     if (h > max_dim) return E_INVALIDARG;
@@ -561,6 +609,7 @@ HRESULT ArenaTexture::create_gpu_buffer(
     hr = create_rtv(device_.Get(), texture->texture.Get(), format, texture->rtv);
     if (FAILED(hr)) return hr;
     texture->width = width; texture->height = static_cast<UINT>(h); texture->count = count;
+    texture->storage_format = format;
     if (data) {
         const std::size_t capacity = static_cast<std::size_t>(width) * h;
         std::vector<std::uint8_t> padded(capacity * bytes, 0);
@@ -591,33 +640,8 @@ HRESULT ArenaTexture::readback_gpu_buffer(
 {
     if (!context || !opaque || !out || count == 0) return E_INVALIDARG;
     auto texture = std::static_pointer_cast<gpuMemBase>(opaque);
-    if (count > texture->count || texture->width == 0) return E_INVALIDARG;
-    D3D11_TEXTURE2D_DESC desc{}; texture->texture->GetDesc(&desc);
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
-    HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &staging);
-    if (FAILED(hr)) return hr;
-    const UINT rows = static_cast<UINT>((count + texture->width - 1u) / texture->width);
-    const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, texture->width));
-    const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
-    context->CopySubresourceRegion(
-        staging.Get(), 0, 0, 0, 0, texture->texture.Get(), 0, &used_region);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return hr;
-    UINT bytes = desc.Format == DXGI_FORMAT_R8_UINT || desc.Format == DXGI_FORMAT_R8_SINT ? 1u :
-        (desc.Format == DXGI_FORMAT_R16_UINT || desc.Format == DXGI_FORMAT_R16_SINT || desc.Format == DXGI_FORMAT_R16_FLOAT ? 2u : 4u);
-    auto* dst = static_cast<std::uint8_t*>(out);
-    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-    std::size_t remaining = count;
-    for (UINT row = 0; remaining && row < texture->height; ++row) {
-        const std::size_t n = std::min<std::size_t>(remaining, texture->width);
-        std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, n * bytes);
-        dst += n * bytes; remaining -= n;
-    }
-    context->Unmap(staging.Get(), 0);
-    return remaining == 0 ? S_OK : E_FAIL;
+    if (count > texture->count) return E_INVALIDARG;
+    return readback_gpu_mem(context, *texture, out, count);
 }
 
 std::shared_ptr<gpuMemBase> ArenaTexture::texture_from_handle(const std::shared_ptr<void>& handle) const noexcept

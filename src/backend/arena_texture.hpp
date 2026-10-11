@@ -86,6 +86,7 @@ private:
         DXGI_FORMAT output_format,
         UINT width,
         UINT height);
+    HRESULT ensure_readback_staging(DXGI_FORMAT format, UINT width, UINT height);
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
 
@@ -93,6 +94,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_b_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> output_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> readback_;
+
+    // One context-owned staging texture shared by all gpuMem readbacks. It is
+    // allocated on first readback and grows/reformats only when required.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> gpu_mem_staging_;
+    DXGI_FORMAT gpu_mem_staging_format_ = DXGI_FORMAT_UNKNOWN;
+    UINT gpu_mem_staging_width_ = 0;
+    UINT gpu_mem_staging_height_ = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_a_srv_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_b_srv_;

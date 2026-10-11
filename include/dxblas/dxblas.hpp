@@ -69,7 +69,7 @@ public:
 
     void assign(const T* data, std::size_t count) {
         if (count != 0 && data == nullptr) throw std::invalid_argument("gpuMem data must not be null");
-        texture.Reset(); staging.Reset(); srv.Reset(); rtv.Reset();
+        texture.Reset(); srv.Reset(); rtv.Reset();
         width = height = 0;
         this->count = count; storage_format = gpu_mem_traits<T>::format;
         if (count == 0) { host_data_.clear(); return; }
@@ -197,12 +197,16 @@ public:
         else return backend_->mul_gpu_mem(a, b, out, element_count);
     }
 
-    // Matrix dimensions are carried by the gpuMem texture shape. Set width and
-    // height before Context::copy, then GEMM consumes the resident textures.
+    // GPU-resident row-major FP32 GEMM: C[M,N] = A[M,K] * B[K,N].
+    // The caller uploads A, B and C with Context::copy first; GEMM then
+    // consumes their resident texture resources without another CPU upload.
     HRESULT gemm(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& out,
                  std::size_t m, std::size_t n, std::size_t k)
     {
         if (!backend_) return E_POINTER;
+        if (m == 0 || n == 0 || k == 0) return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (m > max_size / k || k > max_size / n || m > max_size / n) return E_INVALIDARG;
         if (a.size() < m * k || b.size() < k * n || out.size() < m * n) return E_INVALIDARG;
         if (!a.resident() || !b.resident() || !out.resident()) return E_INVALIDARG;
         return backend_->gemm_gpu_mem(a, b, out, m, n, k);

@@ -16,7 +16,6 @@ public:
     virtual const void* cpu_data() const noexcept { return nullptr; }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
     UINT width = 0;
