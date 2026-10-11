@@ -434,6 +434,17 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
         height = static_cast<UINT>(height_size);
     }
 
+    // Keep existing resources when the requested format and resolved texture
+    // shape are unchanged. Uploads happen repeatedly for the same gpuMem object;
+    // recreating its texture, views and staging resource on every upload adds
+    // avoidable driver and allocation overhead.
+    if (memory.storage_format == format &&
+        memory.width == width && memory.height == height &&
+        memory.texture && memory.staging && memory.srv && memory.rtv) {
+        memory.count = count;
+        return S_OK;
+    }
+
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
