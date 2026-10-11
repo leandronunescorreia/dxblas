@@ -38,6 +38,7 @@ for %%S in (
     dxblas_typed_operations.exe
     dxblas_gpumem_roundtrip.exe
     dxblas_gpumem_sum.exe
+    dxblas_copy_tests.exe
     dxblas_benchmark_2048.exe
     dxblas_big_array.exe
     dxblas_first_step.exe

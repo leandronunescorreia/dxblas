@@ -112,6 +112,11 @@ if(dxBLAS_BUILD_EXAMPLE)
     target_compile_definitions(dxblas_gpumem_sum
         PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+    add_executable(dxblas_copy_tests examples/copy_tests.cpp)
+    target_link_libraries(dxblas_copy_tests PRIVATE dxblas)
+    target_compile_definitions(dxblas_copy_tests
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
     add_executable(dxblas_gemm examples/dxblas_gemm.cpp)
     target_link_libraries(dxblas_gemm PRIVATE dxblas)
     target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
