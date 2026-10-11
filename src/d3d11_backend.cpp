@@ -1,6 +1,7 @@
 #include "backend/d3d11_backend.hpp"
 #include "backend/arena_texture.hpp"
 #include "backend/d3d11_shader_manager.hpp"
+#include <dxblas/device_selection.hpp>
 
 #include <memory>
 #include <algorithm>
@@ -30,37 +31,64 @@ public:
 
     HRESULT step_one_creating_the_device()
     {
-        D3D_FEATURE_LEVEL requested[] = {
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0
-        };
-
         D3D_FEATURE_LEVEL created_level{};
-        HRESULT hr = D3D11CreateDevice(
-            nullptr,
-            driver_type,
-            nullptr,
-            device_flags,
-            requested,
-            ARRAYSIZE(requested),
-            D3D11_SDK_VERSION,
-            &device,
-            &created_level,
-            &context);
+        HRESULT hr = E_FAIL;
 
-        if (FAILED(hr) && (device_flags & D3D11_CREATE_DEVICE_DEBUG)) {
-            device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
-            hr = D3D11CreateDevice(
-                nullptr,
-                driver_type,
-                nullptr,
-                device_flags,
-                requested,
-                ARRAYSIZE(requested),
-                D3D11_SDK_VERSION,
-                &device,
-                &created_level,
-                &context);
+        if (driver_type == D3D_DRIVER_TYPE_HARDWARE) {
+            // Select the hardware adapter with the largest dedicated VRAM.
+            // The helper retries feature level 11_0 and retries without the
+            // debug flag when necessary. It deliberately has no WARP fallback.
+            hr = create_best_d3d11_device(
+                device_flags, device, created_level, context);
+        } else {
+            // Preserve explicitly requested WARP/reference/software driver modes.
+            const D3D_FEATURE_LEVEL requested[] = {
+                D3D_FEATURE_LEVEL_11_1,
+                D3D_FEATURE_LEVEL_11_0
+            };
+            const D3D_FEATURE_LEVEL fallback[] = {
+                D3D_FEATURE_LEVEL_11_0
+            };
+
+            auto create_requested_device = [&](UINT flags) {
+                device.Reset();
+                context.Reset();
+                created_level = {};
+                hr = D3D11CreateDevice(
+                    nullptr,
+                    driver_type,
+                    nullptr,
+                    flags,
+                    requested,
+                    ARRAYSIZE(requested),
+                    D3D11_SDK_VERSION,
+                    &device,
+                    &created_level,
+                    &context);
+
+                if (hr == E_INVALIDARG) {
+                    device.Reset();
+                    context.Reset();
+                    created_level = {};
+                    hr = D3D11CreateDevice(
+                        nullptr,
+                        driver_type,
+                        nullptr,
+                        flags,
+                        fallback,
+                        ARRAYSIZE(fallback),
+                        D3D11_SDK_VERSION,
+                        &device,
+                        &created_level,
+                        &context);
+                }
+            };
+
+            create_requested_device(device_flags);
+            if (FAILED(hr) && (device_flags & D3D11_CREATE_DEVICE_DEBUG)) {
+                device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+                create_requested_device(device_flags);
+            }
         }
 
         if (FAILED(hr))
@@ -70,7 +98,6 @@ public:
 
         return arena_texture.initialize_adaptive(device.Get());
     }
-
 
     HRESULT compile_shaders(
         BinaryOp op,
