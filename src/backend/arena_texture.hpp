@@ -7,18 +7,9 @@
 #include <d3d11.h>
 #include <dxgiformat.h>
 #include <wrl/client.h>
+#include <dxblas/gpu_mem.hpp>
 
 namespace dxblas::detail {
-
-struct GpuTexture final {
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
-    UINT width = 0;
-    UINT height = 0;
-    std::size_t count = 0;
-};
 
 class ArenaTexture final {
 public:
@@ -32,6 +23,7 @@ public:
         ID3D11Device* device,
         UINT initial_width = 2048,
         UINT initial_height = 1);
+    HRESULT initialize_adaptive(ID3D11Device* device);
 
     HRESULT ensure(
         DXGI_FORMAT input_format,
@@ -60,11 +52,30 @@ public:
     ID3D11ShaderResourceView* input_b_srv() const noexcept { return input_b_srv_.Get(); }
     ID3D11RenderTargetView* output_rtv() const noexcept { return output_rtv_.Get(); }
 
-    HRESULT upload_float(ID3D11DeviceContext* context, const void* data, std::size_t count, std::shared_ptr<GpuTexture>& out);
-    HRESULT acquire_float(std::size_t count, std::shared_ptr<GpuTexture>& out);
-    HRESULT acquire_matrix_float(UINT width, UINT height, std::shared_ptr<GpuTexture>& out);
-    HRESULT upload_matrix_float(ID3D11DeviceContext* context, const float* data, UINT width, UINT height, std::shared_ptr<GpuTexture>& out);
-    HRESULT readback_float(ID3D11DeviceContext* context, const std::shared_ptr<GpuTexture>& source, void* destination, std::size_t count);
+    HRESULT upload_float(ID3D11DeviceContext* context, const void* data, std::size_t count, std::shared_ptr<gpuMemBase>& out);
+    HRESULT acquire_float(std::size_t count, std::shared_ptr<gpuMemBase>& out);
+    HRESULT acquire_matrix_float(UINT width, UINT height, std::shared_ptr<gpuMemBase>& out);
+    HRESULT upload_matrix_float(ID3D11DeviceContext* context, const float* data, UINT width, UINT height, std::shared_ptr<gpuMemBase>& out);
+    HRESULT readback_float(ID3D11DeviceContext* context, const std::shared_ptr<gpuMemBase>& source, void* destination, std::size_t count);
+
+    HRESULT copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count);
+    HRESULT upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory, const void* data, std::size_t count);
+    HRESULT prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, std::size_t count);
+    HRESULT readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory, void* out, std::size_t count);
+
+    HRESULT create_gpu_buffer(
+        ID3D11DeviceContext* context, DXGI_FORMAT format, const void* data,
+        std::size_t count, std::shared_ptr<gpuMemBase>& out);
+    HRESULT copy_gpu_buffers(
+        ID3D11DeviceContext* context, DXGI_FORMAT format, const void* a,
+        const void* b, std::size_t count, std::shared_ptr<void>& gpu_a,
+        std::shared_ptr<void>& gpu_b, std::shared_ptr<void>& gpu_out);
+    HRESULT readback_gpu_buffer(
+        ID3D11DeviceContext* context, const std::shared_ptr<void>& array,
+        void* out, std::size_t count);
+    // Returns the texture resource associated with a gpuMem handle. The arena owns
+    // allocation, views, upload and readback; the backend owns all draw/render state.
+    std::shared_ptr<gpuMemBase> texture_from_handle(const std::shared_ptr<void>& handle) const noexcept;
 
     UINT capacity_width() const noexcept { return capacity_width_; }
     UINT capacity_height() const noexcept { return capacity_height_; }
@@ -91,7 +102,7 @@ private:
     DXGI_FORMAT output_format_ = DXGI_FORMAT_UNKNOWN;
     UINT capacity_width_ = 0;
     UINT capacity_height_ = 0;
-    std::vector<std::shared_ptr<GpuTexture>> gpu_slots_;
+    std::vector<std::shared_ptr<gpuMemBase>> gpu_slots_;
 };
 
 } // namespace dxblas::detail

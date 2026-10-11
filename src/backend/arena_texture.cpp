@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+#include <dxgi1_4.h>
 
 namespace dxblas::detail {
 
@@ -83,10 +84,39 @@ HRESULT ArenaTexture::initialize(
     if (FAILED(hr)) return hr;
 
     // Prewarm one GPU-resident slot during Context::initialize().
-    std::shared_ptr<GpuTexture> initial_slot;
+    std::shared_ptr<gpuMemBase> initial_slot;
     hr = acquire_float(static_cast<std::size_t>(initial_width) * initial_height, initial_slot);
     initial_slot.reset(); // return it to the arena pool for the first operation
     return hr;
+}
+
+HRESULT ArenaTexture::initialize_adaptive(ID3D11Device* device)
+{
+    if (!device) return E_INVALIDARG;
+    UINT preferred = 1024;
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device))) &&
+        SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
+        SUCCEEDED(adapter.As(&adapter3))) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+            const UINT64 available = info.Budget > info.CurrentUsage ? info.Budget - info.CurrentUsage : 0;
+            if (available >= (UINT64{1024} * 1024 * 1024)) preferred = 4096;
+            else if (available >= (UINT64{256} * 1024 * 1024)) preferred = 2048;
+        }
+    }
+    preferred = std::min(preferred, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+    HRESULT last = E_FAIL;
+    for (UINT candidate : {preferred, 2048u, 1024u}) {
+        candidate = std::min(candidate, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION));
+        if (!candidate) continue;
+        last = initialize(device, candidate, candidate);
+        if (SUCCEEDED(last)) return S_OK;
+        if (candidate == 1024u) break;
+    }
+    return last;
 }
 
 HRESULT ArenaTexture::ensure(
@@ -273,7 +303,7 @@ HRESULT ArenaTexture::readback(
 }
 
 
-HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<GpuTexture>& out)
+HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<gpuMemBase>& out)
 {
     if (!device_ || count == 0 ||
         count > static_cast<std::size_t>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) *
@@ -288,7 +318,7 @@ HRESULT ArenaTexture::acquire_float(std::size_t count, std::shared_ptr<GpuTextur
 }
 
 HRESULT ArenaTexture::acquire_matrix_float(
-    UINT width, UINT height, std::shared_ptr<GpuTexture>& out)
+    UINT width, UINT height, std::shared_ptr<gpuMemBase>& out)
 {
     if (!device_ || width == 0 || height == 0 ||
         width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
@@ -304,7 +334,7 @@ HRESULT ArenaTexture::acquire_matrix_float(
         }
     }
 
-    auto slot = std::make_shared<GpuTexture>();
+    auto slot = std::make_shared<gpuMemBase>();
     slot->width = width;
     slot->height = height;
     slot->count = count;
@@ -326,7 +356,7 @@ HRESULT ArenaTexture::acquire_matrix_float(
 
 HRESULT ArenaTexture::upload_matrix_float(
     ID3D11DeviceContext* context, const float* data, UINT width, UINT height,
-    std::shared_ptr<GpuTexture>& out)
+    std::shared_ptr<gpuMemBase>& out)
 {
     if (!context || !data || width == 0 || height == 0) return E_INVALIDARG;
     HRESULT hr = acquire_matrix_float(width, height, out);
@@ -338,7 +368,7 @@ HRESULT ArenaTexture::upload_matrix_float(
 
 HRESULT ArenaTexture::upload_float(
     ID3D11DeviceContext* context, const void* data, std::size_t count,
-    std::shared_ptr<GpuTexture>& out)
+    std::shared_ptr<gpuMemBase>& out)
 {
     if (!context || !data || count == 0) return E_INVALIDARG;
     HRESULT hr = acquire_float(count, out);
@@ -358,7 +388,7 @@ HRESULT ArenaTexture::upload_float(
 }
 
 HRESULT ArenaTexture::readback_float(
-    ID3D11DeviceContext* context, const std::shared_ptr<GpuTexture>& source,
+    ID3D11DeviceContext* context, const std::shared_ptr<gpuMemBase>& source,
     void* destination, std::size_t count)
 {
     if (!context || !source || !destination || count != source->count)
@@ -382,5 +412,199 @@ HRESULT ArenaTexture::readback_float(
     return S_OK;
 }
 
+
+
+namespace {
+UINT gpu_mem_bytes(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SINT: return 1;
+    case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16_SINT: case DXGI_FORMAT_R16_FLOAT: return 2;
+    case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: return 4;
+    default: return 0;
+    }
+}
+}
+
+HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, std::size_t count)
+{
+    if (!device_ || count == 0) return E_INVALIDARG;
+    const UINT bytes = gpu_mem_bytes(format);
+    if (!bytes) return E_INVALIDARG;
+    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
+    const std::size_t height_size = (count + width - 1u) / width;
+    if (height_size == 0 || height_size > max_dim) return E_INVALIDARG;
+    const UINT height = static_cast<UINT>(height_size);
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+    HRESULT hr = create_texture(device_.Get(), width, height, format,
+        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0, texture);
+    if (FAILED(hr)) return hr;
+    hr = create_srv(device_.Get(), texture.Get(), format, srv);
+    if (FAILED(hr)) return hr;
+    hr = create_rtv(device_.Get(), texture.Get(), format, rtv);
+    if (FAILED(hr)) return hr;
+    hr = create_texture(device_.Get(), width, height, format, 0,
+        D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
+    if (FAILED(hr)) return hr;
+
+    memory.texture = std::move(texture);
+    memory.staging = std::move(staging);
+    memory.srv = std::move(srv);
+    memory.rtv = std::move(rtv);
+    memory.width = width;
+    memory.height = height;
+    memory.count = count;
+    memory.storage_format = format;
+    return S_OK;
+}
+
+HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory,
+                                     const void* data, std::size_t count)
+{
+    if (!context || !data || count == 0) return E_INVALIDARG;
+    HRESULT hr = prepare_gpu_mem(memory, memory.storage_format, count);
+    if (FAILED(hr)) return hr;
+    const UINT bytes = gpu_mem_bytes(memory.storage_format);
+    const std::size_t capacity = static_cast<std::size_t>(memory.width) * memory.height;
+    if (capacity == count) {
+        // Common case: the caller's payload exactly covers the texture, so
+        // UpdateSubresource can upload directly without an intermediate CPU copy.
+        context->UpdateSubresource(memory.texture.Get(), 0, nullptr, data, memory.width * bytes, 0);
+    } else {
+        // D3D11 reads the full final row, so pad only partial textures to avoid
+        // reading past the caller's allocation.
+        std::vector<std::uint8_t> padded(capacity * bytes, 0);
+        std::memcpy(padded.data(), data, count * bytes);
+        context->UpdateSubresource(memory.texture.Get(), 0, nullptr, padded.data(), memory.width * bytes, 0);
+    }
+    return S_OK;
+}
+
+HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory,
+                                       void* out, std::size_t count)
+{
+    if (!context || !memory.texture.Get() || !memory.staging.Get() || !out || count == 0 || count > memory.count)
+        return E_INVALIDARG;
+    context->CopyResource(memory.staging.Get(), memory.texture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    HRESULT hr = context->Map(memory.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return hr;
+    const UINT bytes = gpu_mem_bytes(memory.storage_format);
+    if (!bytes) { context->Unmap(memory.staging.Get(), 0); return E_INVALIDARG; }
+    auto* dst = static_cast<std::uint8_t*>(out);
+    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+    std::size_t remaining = count;
+    for (UINT row = 0; remaining && row < memory.height; ++row) {
+        const std::size_t n = std::min<std::size_t>(remaining, memory.width);
+        std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, n * bytes);
+        dst += n * bytes;
+        remaining -= n;
+    }
+    context->Unmap(memory.staging.Get(), 0);
+    return remaining == 0 ? S_OK : E_FAIL;
+}
+
+HRESULT ArenaTexture::copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a,
+                                             gpuMemBase& b, gpuMemBase& out, std::size_t count)
+{
+    if (!context || !a.cpu_data() || !b.cpu_data() || count == 0 || a.storage_format != b.storage_format ||
+        a.storage_format != out.storage_format) return E_INVALIDARG;
+    HRESULT hr = upload_gpu_mem(context, a, a.cpu_data(), count);
+    if (FAILED(hr)) return hr;
+    hr = upload_gpu_mem(context, b, b.cpu_data(), count);
+    if (FAILED(hr)) return hr;
+    return prepare_gpu_mem(out, out.storage_format, count);
+}
+
+HRESULT ArenaTexture::create_gpu_buffer(
+    ID3D11DeviceContext* context, DXGI_FORMAT format, const void* data,
+    std::size_t count, std::shared_ptr<gpuMemBase>& out)
+{
+    if (!context || count == 0) return E_INVALIDARG;
+    UINT bytes = 0;
+    switch (format) {
+    case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SINT: bytes = 1; break;
+    case DXGI_FORMAT_R16_UINT: case DXGI_FORMAT_R16_SINT: case DXGI_FORMAT_R16_FLOAT: bytes = 2; break;
+    case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT: case DXGI_FORMAT_R32_FLOAT: bytes = 4; break;
+    default: return E_INVALIDARG;
+    }
+    const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
+    const std::size_t h = (count + width - 1u) / width;
+    if (h > max_dim) return E_INVALIDARG;
+    auto texture = std::make_shared<gpuMemBase>();
+    HRESULT hr = create_texture(device_.Get(), width, static_cast<UINT>(h), format,
+        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0, texture->texture);
+    if (FAILED(hr)) return hr;
+    hr = create_srv(device_.Get(), texture->texture.Get(), format, texture->srv);
+    if (FAILED(hr)) return hr;
+    hr = create_rtv(device_.Get(), texture->texture.Get(), format, texture->rtv);
+    if (FAILED(hr)) return hr;
+    texture->width = width; texture->height = static_cast<UINT>(h); texture->count = count;
+    if (data) {
+        const std::size_t capacity = static_cast<std::size_t>(width) * h;
+        std::vector<std::uint8_t> padded(capacity * bytes, 0);
+        std::memcpy(padded.data(), data, count * bytes);
+        context->UpdateSubresource(texture->texture.Get(), 0, nullptr, padded.data(), width * bytes, 0);
+    }
+    out = std::move(texture);
+    return S_OK;
+}
+
+HRESULT ArenaTexture::copy_gpu_buffers(
+    ID3D11DeviceContext* context, DXGI_FORMAT format, const void* a, const void* b,
+    std::size_t count, std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b,
+    std::shared_ptr<void>& gpu_out)
+{
+    if (!a || !b || count == 0) return E_INVALIDARG;
+    std::shared_ptr<gpuMemBase> ta, tb, to;
+    HRESULT hr = create_gpu_buffer(context, format, a, count, ta); if (FAILED(hr)) return hr;
+    hr = create_gpu_buffer(context, format, b, count, tb); if (FAILED(hr)) return hr;
+    hr = create_gpu_buffer(context, format, nullptr, count, to); if (FAILED(hr)) return hr;
+    gpu_a = std::move(ta); gpu_b = std::move(tb); gpu_out = std::move(to);
+    return S_OK;
+}
+
+HRESULT ArenaTexture::readback_gpu_buffer(
+    ID3D11DeviceContext* context, const std::shared_ptr<void>& opaque,
+    void* out, std::size_t count)
+{
+    if (!context || !opaque || !out || count == 0) return E_INVALIDARG;
+    auto texture = std::static_pointer_cast<gpuMemBase>(opaque);
+    if (count > texture->count) return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC desc{}; texture->texture->GetDesc(&desc);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
+    HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &staging);
+    if (FAILED(hr)) return hr;
+    context->CopyResource(staging.Get(), texture->texture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return hr;
+    UINT bytes = desc.Format == DXGI_FORMAT_R8_UINT || desc.Format == DXGI_FORMAT_R8_SINT ? 1u :
+        (desc.Format == DXGI_FORMAT_R16_UINT || desc.Format == DXGI_FORMAT_R16_SINT || desc.Format == DXGI_FORMAT_R16_FLOAT ? 2u : 4u);
+    auto* dst = static_cast<std::uint8_t*>(out);
+    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+    std::size_t remaining = count;
+    for (UINT row = 0; remaining && row < texture->height; ++row) {
+        const std::size_t n = std::min<std::size_t>(remaining, texture->width);
+        std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, n * bytes);
+        dst += n * bytes; remaining -= n;
+    }
+    context->Unmap(staging.Get(), 0);
+    return remaining == 0 ? S_OK : E_FAIL;
+}
+
+std::shared_ptr<gpuMemBase> ArenaTexture::texture_from_handle(const std::shared_ptr<void>& handle) const noexcept
+{
+    if (!handle) return {};
+    return std::static_pointer_cast<gpuMemBase>(handle);
+}
 
 } // namespace dxblas::detail

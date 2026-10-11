@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <dxblas/backend.hpp>
+#include <dxblas/gpu_mem.hpp>
 
 namespace dxblas {
 
@@ -50,7 +51,7 @@ template<> struct gpu_mem_traits<float16> { static constexpr DXGI_FORMAT format 
 template<> struct gpu_mem_traits<float> { static constexpr DXGI_FORMAT format = DXGI_FORMAT_R32_FLOAT; };
 
 template<class T>
-class gpuMem {
+class gpuMem : public gpuMemBase {
     static_assert(
         std::is_same_v<T, std::uint8_t> ||
         std::is_same_v<T, std::int16_t> ||
@@ -60,36 +61,36 @@ class gpuMem {
         "gpuMem<T> supports uint8_t, int16_t, int32_t, dxblas::float16 and float");
 public:
     using value_type = T;
-    gpuMem() = default;
-    explicit gpuMem(std::size_t count) : count_(count), host_data_(count) {}
-    gpuMem(const T* data, std::size_t count) : count_(count) { assign(data, count); }
-    explicit gpuMem(const std::vector<T>& data) : count_(data.size()), host_data_(data) {}
-    gpuMem(std::initializer_list<T> data) : count_(data.size()), host_data_(data) {}
+    gpuMem() { storage_format = gpu_mem_traits<T>::format; }
+    explicit gpuMem(std::size_t element_count) : host_data_(element_count) { count = element_count; storage_format = gpu_mem_traits<T>::format; }
+    gpuMem(const T* data, std::size_t element_count) { storage_format = gpu_mem_traits<T>::format; assign(data, element_count); }
+    explicit gpuMem(const std::vector<T>& data) : host_data_(data) { count = data.size(); storage_format = gpu_mem_traits<T>::format; }
+    gpuMem(std::initializer_list<T> data) : host_data_(data) { count = data.size(); storage_format = gpu_mem_traits<T>::format; }
 
     void assign(const T* data, std::size_t count) {
         if (count != 0 && data == nullptr) throw std::invalid_argument("gpuMem data must not be null");
-        texture_address_.reset();
-        count_ = count;
+        texture.Reset(); staging.Reset(); srv.Reset(); rtv.Reset();
+        width = height = 0;
+        this->count = count; storage_format = gpu_mem_traits<T>::format;
         if (count == 0) { host_data_.clear(); return; }
         host_data_.assign(data, data + count);
     }
     void assign(const std::vector<T>& data) { assign(data.data(), data.size()); }
-    std::size_t size() const noexcept { return count_; }
-    bool empty() const noexcept { return count_ == 0; }
+    std::size_t size() const noexcept { return count; }
+    bool empty() const noexcept { return count == 0; }
     DXGI_FORMAT format() const noexcept { return gpu_mem_traits<T>::format; }
-    bool resident() const noexcept { return static_cast<bool>(texture_address_); }
+    bool resident() const noexcept { return texture.Get() != nullptr; }
 
     // Before Context::copy this is the CPU upload payload. After a successful
-    // copy, the payload is discarded and the object retains only its GPU handle.
+    // copy, the payload is discarded and this object owns its GPU resources.
     const T* data() const noexcept { return host_data_.empty() ? nullptr : host_data_.data(); }
+    const void* cpu_data() const noexcept override { return data(); }
     std::vector<T>& host_data() noexcept { return host_data_; }
     const std::vector<T>& host_data() const noexcept { return host_data_; }
 
 private:
     friend class Context;
-    std::size_t count_ = 0;
     std::vector<T> host_data_;
-    std::shared_ptr<void> texture_address_;
 };
 
 // A reference-counted GPU-resident float array. Its texture storage is returned
@@ -156,60 +157,43 @@ public:
     HRESULT mul_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out);
     HRESULT readback_gpu(const GpuArray& array, void* out, std::size_t count);
 
-    // Upload both CPU inputs into backend-owned D3D11 textures and allocate
-    // an output texture. gpuMem then retains the texture address/handle only.
+    // ArenaTexture writes directly into each gpuMem resource; no intermediate
+    // separate texture wrapper or shared_ptr indirection is created.
     template<class T>
-    HRESULT copy(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t count)
+    HRESULT copy(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count)
     {
         if (!backend_) return E_POINTER;
-        if (count > a.size() || count > b.size() || count > out.size()) return E_INVALIDARG;
-        if (count == 0) return S_OK;
-        if (a.data() == nullptr || b.data() == nullptr) return E_INVALIDARG;
-        std::shared_ptr<void> gpu_a, gpu_b, gpu_out;
-        HRESULT hr = backend_->copy_gpu(a.format(), a.data(), b.data(), count, gpu_a, gpu_b, gpu_out);
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size()) return E_INVALIDARG;
+        if (element_count == 0) return S_OK;
+        if (!a.data() || !b.data()) return E_INVALIDARG;
+        HRESULT hr = backend_->copy_gpu_mem(a, b, out, element_count);
         if (FAILED(hr)) return hr;
-        a.texture_address_ = std::move(gpu_a);
-        b.texture_address_ = std::move(gpu_b);
-        out.texture_address_ = std::move(gpu_out);
         a.host_data_.clear(); a.host_data_.shrink_to_fit();
         b.host_data_.clear(); b.host_data_.shrink_to_fit();
         out.host_data_.clear(); out.host_data_.shrink_to_fit();
-        a.count_ = b.count_ = out.count_ = count;
+        a.count = b.count = out.count = element_count;
         return S_OK;
     }
 
-    // Execute an elementwise GPU sum using gpuMem texture handles. The first
-    // implementation intentionally supports FP32, using a D3D11 pixel shader.
     template<class T>
-    HRESULT sum(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t count)
+    HRESULT sum(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count)
     {
         if (!backend_) return E_POINTER;
-        if (count > a.size() || count > b.size() || count > out.size()) return E_INVALIDARG;
-        if (count == 0) return S_OK;
-        if constexpr (!std::is_same_v<T, float>) {
-            return E_NOTIMPL;
-        } else {
-            if (!a.texture_address_ || !b.texture_address_) return E_INVALIDARG;
-            std::shared_ptr<void> gpu_out;
-            HRESULT hr = backend_->sum_texture_gpu(a.texture_address_, b.texture_address_, count, gpu_out);
-            if (FAILED(hr)) return hr;
-            out.texture_address_ = std::move(gpu_out);
-            out.host_data_.clear(); out.host_data_.shrink_to_fit();
-            out.count_ = count;
-            return S_OK;
-        }
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size()) return E_INVALIDARG;
+        if (element_count == 0) return S_OK;
+        if (!a.resident() || !b.resident()) return E_INVALIDARG;
+        if constexpr (!std::is_same_v<T, float>) return E_NOTIMPL;
+        else return backend_->sum_gpu_mem(a, b, out, element_count);
     }
 
-    // Read a typed gpuMem allocation back into caller-owned CPU memory. The
-    // backend performs the D3D11 staging copy and row-pitch-aware transfer.
     template<class T>
-    HRESULT copy_to_cpu(gpuMem<T>& source, T* destination, std::size_t count)
+    HRESULT copy_to_cpu(gpuMem<T>& source, T* destination, std::size_t element_count)
     {
         if (!backend_) return E_POINTER;
-        if (count > source.size() || (count != 0 && destination == nullptr)) return E_INVALIDARG;
-        if (count == 0) return S_OK;
-        if (!source.texture_address_) return E_INVALIDARG;
-        return backend_->readback_copy_gpu(source.texture_address_, destination, count);
+        if (element_count > source.size() || (element_count != 0 && destination == nullptr)) return E_INVALIDARG;
+        if (element_count == 0) return S_OK;
+        if (!source.resident()) return E_INVALIDARG;
+        return backend_->readback_gpu_mem(source, destination, element_count);
     }
 
     IBackend* backend() noexcept;
