@@ -311,6 +311,16 @@ HRESULT ArenaTexture::readback(
     auto* dst = static_cast<std::uint8_t*>(destination);
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
 
+    // D3D11 may pad mapped rows. If it did not, copy the complete payload
+    // in one operation instead of issuing one memcpy per row.
+    const std::size_t tight_row_bytes =
+        static_cast<std::size_t>(width) * bytes_per_element;
+    if (!packed_integer && mapped.RowPitch == tight_row_bytes) {
+        std::memcpy(dst, src, static_cast<std::size_t>(elements) * bytes_per_element);
+        context->Unmap(readback_.Get(), 0);
+        return S_OK;
+    }
+
     for (UINT y = 0; y < height; ++y) {
         const UINT row_elements =
             (y + 1u == height) ? last_row_elements : width;
@@ -445,6 +455,14 @@ HRESULT ArenaTexture::readback_float(
 
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
     auto* dst = static_cast<std::uint8_t*>(destination);
+    const std::size_t tight_row_bytes =
+        static_cast<std::size_t>(copied_width) * sizeof(float);
+    if (mapped.RowPitch == tight_row_bytes) {
+        std::memcpy(dst, src, count * sizeof(float));
+        context->Unmap(shared_staging_.Get(), 0);
+        return S_OK;
+    }
+
     std::size_t copied = 0;
     for (UINT y = 0; y < rows && copied < count; ++y) {
         const std::size_t row_count = std::min<std::size_t>(source->width, count - copied);
@@ -580,6 +598,14 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
     if (!bytes) { context->Unmap(shared_staging_.Get(), 0); return E_INVALIDARG; }
     auto* dst = static_cast<std::uint8_t*>(out);
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+    const std::size_t tight_row_bytes =
+        static_cast<std::size_t>(copied_width) * bytes;
+    if (mapped.RowPitch == tight_row_bytes) {
+        std::memcpy(dst, src, count * bytes);
+        context->Unmap(shared_staging_.Get(), 0);
+        return S_OK;
+    }
+
     std::size_t remaining = count;
     for (UINT row = 0; remaining && row < rows; ++row) {
         const std::size_t n = std::min<std::size_t>(remaining, memory.width);
