@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <string>
 #include <random>
 #include <thread>
 #include <vector>
@@ -131,13 +132,15 @@ int main(int argc, char** argv)
     dxblas::Context context;
     if (!check_hr(context.initialize(), "dxblas::Context::initialize")) return 1;
 
-    // Compile the shader before timing the requested workload.
+    // Warm up the shader path with gpuMem-owned matrix textures.
     const std::size_t warm_n = std::min<std::size_t>(16, n);
     std::vector<float> warm_a(warm_n * warm_n, 1.0f);
     std::vector<float> warm_b(warm_n * warm_n, 1.0f);
-    std::vector<float> warm_c(warm_n * warm_n);
-    if (!check_hr(context.gemm(warm_a.data(), warm_b.data(), warm_c.data(),
-                               warm_n, warm_n, warm_n), "GEMM warm-up")) return 1;
+    dxblas::gpuMem<float> warm_gpu_a(warm_a), warm_gpu_b(warm_b), warm_gpu_c(warm_n * warm_n);
+    warm_gpu_a.width = warm_gpu_b.width = warm_gpu_c.width = static_cast<UINT>(warm_n);
+    warm_gpu_a.height = warm_gpu_b.height = warm_gpu_c.height = static_cast<UINT>(warm_n);
+    if (!check_hr(context.copy(warm_gpu_a, warm_gpu_b, warm_gpu_c, warm_n * warm_n), "GEMM warm-up upload")) return 1;
+    if (!check_hr(context.gemm(warm_gpu_a, warm_gpu_b, warm_gpu_c, warm_n, warm_n, warm_n), "GEMM warm-up")) return 1;
 
     std::cout << "Running CPU reference (multi-threaded, row-major)...\n";
     const auto cpu_start = Clock::now();
@@ -147,16 +150,35 @@ int main(int argc, char** argv)
     const double gflops = 2.0 * static_cast<double>(n) * n * n / (cpu_time.milliseconds * 1.0e6);
     std::cout << "CPU time: " << cpu_time.milliseconds << " ms (" << gflops << " GFLOP/s)\n\n";
 
-    std::cout << "Running GPU GEMM (includes matrix upload and result readback)...\n";
+    std::cout << "Uploading matrices to gpuMem textures...\n";
+    dxblas::gpuMem<float> gpu_a(a), gpu_b(b), gpu_c(elements);
+    gpu_a.width = gpu_c.width = static_cast<UINT>(n);
+    gpu_a.height = gpu_c.height = static_cast<UINT>(n);
+    gpu_b.width = static_cast<UINT>(n);
+    gpu_b.height = static_cast<UINT>(n);
+    const auto upload_start = Clock::now();
+    HRESULT gpu_hr = context.copy(gpu_a, gpu_b, gpu_c, elements);
+    const auto upload_end = Clock::now();
+    if (!check_hr(gpu_hr, "Context::copy(gpuMem)")) return 1;
+
+    std::cout << "Running GPU-resident GEMM (no input re-upload)...\n";
     const auto gpu_start = Clock::now();
-    const HRESULT gpu_hr = context.gemm(a.data(), b.data(), gpu_result.data(), n, n, n);
-    const auto gpu_end = Clock::now();
-    if (!check_hr(gpu_hr, "Context::gemm")) {
+    gpu_hr = context.gemm(gpu_a, gpu_b, gpu_c, n, n, n);
+    const auto gpu_compute_end = Clock::now();
+    if (!check_hr(gpu_hr, "Context::gemm(gpuMem)")) {
         std::cerr << "Note: the pixel-shader implementation performs a K-length dot product per output pixel. "
                      "Large sizes can be slow or affected by the Windows GPU timeout (TDR).\n";
         return 1;
     }
-    const Timing gpu_time = elapsed(gpu_start, gpu_end);
+    gpu_hr = context.copy_to_cpu(gpu_c, gpu_result.data(), elements);
+    const auto gpu_end = Clock::now();
+    if (!check_hr(gpu_hr, "Context::copy_to_cpu")) return 1;
+    const Timing upload_time = elapsed(upload_start, upload_end);
+    const Timing compute_time = elapsed(gpu_start, gpu_compute_end);
+    std::cout << "CPU -> GPU upload: " << upload_time.milliseconds << " ms\n"
+              << "GPU-resident GEMM: " << compute_time.milliseconds << " ms\n"
+              << "GPU -> CPU readback: " << elapsed(gpu_compute_end, gpu_end).milliseconds << " ms\n";
+    const Timing gpu_time = elapsed(upload_start, gpu_end);
     const double gpu_gflops = 2.0 * static_cast<double>(n) * n * n / (gpu_time.milliseconds * 1.0e6);
     std::cout << "GPU end-to-end time: " << gpu_time.milliseconds << " ms (" << gpu_gflops << " GFLOP/s)\n";
     if (gpu_time.milliseconds > 0.0)

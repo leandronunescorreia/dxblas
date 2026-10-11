@@ -116,6 +116,10 @@ if(dxBLAS_BUILD_EXAMPLE)
     target_link_libraries(dxblas_gemm PRIVATE dxblas)
     target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+    add_executable(dxblas_matrix_multiply_4096 examples/matrix_multiply_4096.cpp)
+    target_link_libraries(dxblas_matrix_multiply_4096 PRIVATE dxblas)
+    target_compile_definitions(dxblas_matrix_multiply_4096 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
     # Also deploy editable HLSL beside the executable. Shader loading has an
     # embedded fallback, so this is for development and runtime overrides.
     add_custom_command(TARGET dxblas_gemm POST_BUILD

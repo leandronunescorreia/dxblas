@@ -432,10 +432,17 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     const UINT bytes = gpu_mem_bytes(format);
     if (!bytes) return E_INVALIDARG;
     const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
-    const UINT width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
-    const std::size_t height_size = (count + width - 1u) / width;
-    if (height_size == 0 || height_size > max_dim) return E_INVALIDARG;
-    const UINT height = static_cast<UINT>(height_size);
+    // Preserve a caller-provided matrix shape when it can contain the payload;
+    // otherwise use the standard contiguous 1D-array packing.
+    UINT width = memory.width;
+    UINT height = memory.height;
+    if (width == 0 || height == 0 || width > max_dim || height > max_dim ||
+        static_cast<std::size_t>(width) * height < count) {
+        width = static_cast<UINT>(std::min<std::size_t>(count, max_dim));
+        const std::size_t height_size = (count + width - 1u) / width;
+        if (height_size == 0 || height_size > max_dim) return E_INVALIDARG;
+        height = static_cast<UINT>(height_size);
+    }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;

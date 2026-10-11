@@ -160,21 +160,27 @@ public:
         return arena_texture.readback_gpu_mem(context.Get(), source, out, count);
     }
 
-    HRESULT sum_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
+    HRESULT binary_gpu_mem(BinaryOp op, gpuMemBase& a, gpuMemBase& b,
+                           gpuMemBase& out, std::size_t count)
     {
-        if (a.storage_format != DXGI_FORMAT_R32_FLOAT || b.storage_format != DXGI_FORMAT_R32_FLOAT ||
-            out.storage_format != DXGI_FORMAT_R32_FLOAT || !a.texture.Get() || !b.texture.Get() || count > a.count || count > b.count)
+        if (a.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            b.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            out.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            !a.texture.Get() || !b.texture.Get() || count > a.count || count > b.count ||
+            count > out.count || a.width != b.width || a.height != b.height ||
+            a.width != out.width || a.height != out.height)
             return E_INVALIDARG;
+
         ComPtr<ID3D11VertexShader> vs;
         ComPtr<ID3D11PixelShader> ps;
-        HRESULT hr = compile_shaders(BinaryOp::Add, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        HRESULT hr = compile_shaders(op, DXGI_FORMAT_R32_FLOAT, vs, ps);
         if (FAILED(hr)) return hr;
-        hr = arena_texture.prepare_gpu_mem(out, DXGI_FORMAT_R32_FLOAT, count);
-        if (FAILED(hr)) return hr;
-        if (a.width != out.width || a.height != out.height || b.width != out.width || b.height != out.height)
-            return E_INVALIDARG;
-        D3D11_VIEWPORT vp{}; vp.Width = static_cast<float>(out.width); vp.Height = static_cast<float>(out.height);
-        vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(out.width);
+        vp.Height = static_cast<float>(out.height);
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
         ID3D11RenderTargetView* rtv = out.rtv.Get();
         context->OMSetRenderTargets(1, &rtv, nullptr);
         context->RSSetViewports(1, &vp);
@@ -191,6 +197,69 @@ public:
         context->VSSetShader(nullptr, nullptr, 0);
         context->OMSetRenderTargets(0, nullptr, nullptr);
         out.count = count;
+        return S_OK;
+    }
+
+    HRESULT sum_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
+    { return binary_gpu_mem(BinaryOp::Add, a, b, out, count); }
+
+    HRESULT mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
+    { return binary_gpu_mem(BinaryOp::Mul, a, b, out, count); }
+
+    HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out,
+                         std::size_t m, std::size_t n, std::size_t k)
+    {
+        if (!a.texture.Get() || !b.texture.Get() || !out.texture.Get() ||
+            a.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            b.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            out.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            a.width != k || a.height != m || b.width != n || b.height != k ||
+            out.width != n || out.height != m ||
+            a.count < m * k || b.count < k * n || out.count < m * n)
+            return E_INVALIDARG;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        HRESULT hr = compile_shaders(BinaryOp::Gemm, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr)) return hr;
+
+        struct Constants { UINT m, n, k, padding; } constants{
+            static_cast<UINT>(m), static_cast<UINT>(n), static_cast<UINT>(k), 0 };
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(Constants);
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> cb;
+        hr = device->CreateBuffer(&bd, nullptr, &cb);
+        if (FAILED(hr)) return hr;
+        context->UpdateSubresource(cb.Get(), 0, nullptr, &constants, 0, 0);
+
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = { a.srv.Get(), b.srv.Get() };
+        context->PSSetShaderResources(0, 2, srvs);
+        ID3D11Buffer* cbs[] = { cb.Get() };
+        context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11RenderTargetView* rtv = out.rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(n);
+        vp.Height = static_cast<float>(m);
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        context->RSSetViewports(1, &vp);
+        context->Draw(3, 0);
+
+        ID3D11ShaderResourceView* null_srvs[] = { nullptr, nullptr };
+        context->PSSetShaderResources(0, 2, null_srvs);
+        ID3D11Buffer* null_cbs[] = { nullptr };
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        out.count = m * n;
         return S_OK;
     }
 
@@ -370,6 +439,10 @@ HRESULT D3D11Backend::readback_gpu_mem(gpuMemBase& source, void* out, std::size_
 
 HRESULT D3D11Backend::sum_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
 { return impl_->sum_gpu_mem(a, b, out, count); }
+HRESULT D3D11Backend::mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
+{ return impl_->mul_gpu_mem(a, b, out, count); }
+HRESULT D3D11Backend::gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m, std::size_t n, std::size_t k)
+{ return impl_->gemm_gpu_mem(a, b, out, m, n, k); }
 
 HRESULT D3D11Backend::readback_copy_gpu(const std::shared_ptr<void>& array, void* out, std::size_t count)
 {

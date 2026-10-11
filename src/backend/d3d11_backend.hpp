@@ -45,6 +45,8 @@ public:
     HRESULT copy_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT readback_gpu_mem(gpuMemBase& source, void* out, std::size_t count) override;
     HRESULT sum_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
+    HRESULT mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
+    HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m, std::size_t n, std::size_t k) override;
 
     HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out) override;
     HRESULT copy_gpu(DXGI_FORMAT format, const void* a, const void* b, std::size_t count, std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b, std::shared_ptr<void>& gpu_out) override;

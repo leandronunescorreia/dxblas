@@ -187,6 +187,28 @@ public:
     }
 
     template<class T>
+    HRESULT mul(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count)
+    {
+        if (!backend_) return E_POINTER;
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size()) return E_INVALIDARG;
+        if (element_count == 0) return S_OK;
+        if (!a.resident() || !b.resident()) return E_INVALIDARG;
+        if constexpr (!std::is_same_v<T, float>) return E_NOTIMPL;
+        else return backend_->mul_gpu_mem(a, b, out, element_count);
+    }
+
+    // Matrix dimensions are carried by the gpuMem texture shape. Set width and
+    // height before Context::copy, then GEMM consumes the resident textures.
+    HRESULT gemm(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& out,
+                 std::size_t m, std::size_t n, std::size_t k)
+    {
+        if (!backend_) return E_POINTER;
+        if (a.size() < m * k || b.size() < k * n || out.size() < m * n) return E_INVALIDARG;
+        if (!a.resident() || !b.resident() || !out.resident()) return E_INVALIDARG;
+        return backend_->gemm_gpu_mem(a, b, out, m, n, k);
+    }
+
+    template<class T>
     HRESULT copy_to_cpu(gpuMem<T>& source, T* destination, std::size_t element_count)
     {
         if (!backend_) return E_POINTER;

@@ -1,163 +1,77 @@
 #include <dxblas/dxblas.hpp>
 
+#include <chrono>
 #include <cmath>
-#include <cstdint>
+#include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <vector>
 
-static void print_hresult(const char* operation, HRESULT hr)
-{
-    if (FAILED(hr))
-        std::cerr << operation << " failed: 0x"
-                  << std::hex << static_cast<unsigned long>(hr)
-                  << std::dec << '\n';
-}
+using Clock = std::chrono::steady_clock;
 
 int main()
 {
-    constexpr std::size_t N = 512;
-    std::cout << "=== dxBLAS: 512-Element Array Sample ===\n";
-    std::cout << "Element count: " << N << " (offscreen Texture2D pixel pass)\n\n";
+    constexpr std::size_t count = 1u << 22; // 4,194,304 FP32 elements per input.
+    std::vector<float> cpu_a(count), cpu_b(count), cpu_result(count), gpu_result(count);
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (std::size_t i = 0; i < count; ++i) {
+        cpu_a[i] = dist(rng);
+        cpu_b[i] = dist(rng);
+        cpu_result[i] = cpu_a[i] + cpu_b[i];
+    }
 
-    // Initialize context
-    dxblas::Context context(
-        D3D_DRIVER_TYPE_HARDWARE,
-        D3D11_CREATE_DEVICE_DEBUG);
-
+    dxblas::Context context;
     HRESULT hr = context.initialize();
     if (FAILED(hr)) {
-        print_hresult("context.initialize", hr);
+        std::cerr << "Context::initialize failed: 0x" << std::hex
+                  << static_cast<unsigned long>(hr) << std::dec << '\n';
         return 1;
     }
 
-    // 1. Float arrays
-    std::vector<float> a(N);
-    std::vector<float> b(N);
-    std::vector<float> sum_out(N);
-    std::vector<float> mul_out(N);
-
-    for (std::size_t i = 0; i < N; ++i) {
-        a[i] = static_cast<float>(i) * 0.5f;
-        b[i] = 2.0f;
-    }
-
-    // GPU Sum
-    hr = context.sum(
-        DXGI_FORMAT_R32_FLOAT,
-        a.data(),
-        b.data(),
-        sum_out.data(),
-        N);
-
+    dxblas::gpuMem<float> a(cpu_a), b(cpu_b), out(count);
+    const auto upload_start = Clock::now();
+    hr = context.copy(a, b, out, count);
+    const auto upload_end = Clock::now();
     if (FAILED(hr)) {
-        print_hresult("context.sum (float)", hr);
+        std::cerr << "Context::copy failed: 0x" << std::hex
+                  << static_cast<unsigned long>(hr) << std::dec << '\n';
         return 2;
     }
 
-    // GPU Mul
-    hr = context.mul(
-        DXGI_FORMAT_R32_FLOAT,
-        a.data(),
-        b.data(),
-        mul_out.data(),
-        N);
-
+    const auto sum_start = Clock::now();
+    hr = context.sum(a, b, out, count);
+    const auto sum_end = Clock::now();
     if (FAILED(hr)) {
-        print_hresult("context.mul (float)", hr);
+        std::cerr << "Context::sum(gpuMem) failed: 0x" << std::hex
+                  << static_cast<unsigned long>(hr) << std::dec << '\n';
         return 3;
     }
 
-    // Validate float results against CPU reference
-    bool float_valid = true;
-    for (std::size_t i = 0; i < N; ++i) {
-        float expected_sum = a[i] + b[i];
-        float expected_mul = a[i] * b[i];
-
-        if (std::abs(sum_out[i] - expected_sum) > 1e-5f ||
-            std::abs(mul_out[i] - expected_mul) > 1e-5f) {
-            std::cerr << "Mismatch at index " << i << ":\n"
-                      << "  sum: got " << sum_out[i] << ", expected " << expected_sum << '\n'
-                      << "  mul: got " << mul_out[i] << ", expected " << expected_mul << '\n';
-            float_valid = false;
-            break;
-        }
-    }
-
-    if (float_valid) {
-        std::cout << "[PASS] Float: all 512 elements matched CPU reference!\n";
-    } else {
-        std::cerr << "[FAIL] Float validation failed.\n";
+    const auto read_start = Clock::now();
+    hr = context.copy_to_cpu(out, gpu_result.data(), count);
+    const auto read_end = Clock::now();
+    if (FAILED(hr)) {
+        std::cerr << "copy_to_cpu failed: 0x" << std::hex
+                  << static_cast<unsigned long>(hr) << std::dec << '\n';
         return 4;
     }
 
-    // 2. Display sample results
-    std::cout << "\nSample results (first 5 and last 5 elements):\n";
-    std::cout << std::setw(6) << "Index"
-              << std::setw(12) << "A"
-              << std::setw(12) << "B"
-              << std::setw(14) << "A + B (sum)"
-              << std::setw(14) << "A * B (mul)" << '\n';
-    std::cout << std::string(58, '-') << '\n';
-
-    auto print_row = [&](std::size_t i) {
-        std::cout << std::setw(6) << i
-                  << std::setw(12) << a[i]
-                  << std::setw(12) << b[i]
-                  << std::setw(14) << sum_out[i]
-                  << std::setw(14) << mul_out[i] << '\n';
-    };
-
-    for (std::size_t i = 0; i < 5; ++i)
-        print_row(i);
-
-    std::cout << std::setw(6) << "..."
-              << std::setw(12) << "..."
-              << std::setw(12) << "..."
-              << std::setw(14) << "..."
-              << std::setw(14) << "..." << '\n';
-
-    for (std::size_t i = N - 5; i < N; ++i)
-        print_row(i);
-
-    // 3. Uint32 verification
-    std::vector<std::uint32_t> ua(N);
-    std::vector<std::uint32_t> ub(N);
-    std::vector<std::uint32_t> usum(N);
-    std::vector<std::uint32_t> umul(N);
-
-    for (std::size_t i = 0; i < N; ++i) {
-        ua[i] = static_cast<std::uint32_t>(i + 1);
-        ub[i] = 10;
+    std::size_t mismatches = 0;
+    float max_error = 0.0f;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float error = std::fabs(cpu_result[i] - gpu_result[i]);
+        max_error = std::max(max_error, error);
+        if (error > 1e-5f) ++mismatches;
     }
-
-    hr = context.sum(DXGI_FORMAT_R32_UINT, ua.data(), ub.data(), usum.data(), N);
-    if (FAILED(hr)) {
-        print_hresult("context.sum (uint32)", hr);
-        return 5;
-    }
-
-    hr = context.mul(DXGI_FORMAT_R32_UINT, ua.data(), ub.data(), umul.data(), N);
-    if (FAILED(hr)) {
-        print_hresult("context.mul (uint32)", hr);
-        return 6;
-    }
-
-    bool uint_valid = true;
-    for (std::size_t i = 0; i < N; ++i) {
-        if (usum[i] != (ua[i] + ub[i]) || umul[i] != (ua[i] * ub[i])) {
-            std::cerr << "Uint32 mismatch at index " << i << '\n';
-            uint_valid = false;
-            break;
-        }
-    }
-
-    if (uint_valid) {
-        std::cout << "\n[PASS] Uint32: all 512 elements matched CPU reference!\n";
-    } else {
-        std::cerr << "[FAIL] Uint32 validation failed.\n";
-        return 7;
-    }
-
-    return 0;
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    std::cout << "dxblas_big_array: gpuMem FP32 sum\n"
+              << "Elements per input: " << count << " (" << std::fixed << std::setprecision(2)
+              << (count * sizeof(float) / (1024.0 * 1024.0)) << " MiB each)\n"
+              << "CPU -> GPU: " << ms(upload_end - upload_start) << " ms\n"
+              << "GPU sum dispatch + completion: " << ms(sum_end - sum_start) << " ms\n"
+              << "GPU -> CPU: " << ms(read_end - read_start) << " ms\n"
+              << "Mismatches: " << mismatches << ", max abs error: " << max_error << '\n';
+    return mismatches == 0 ? 0 : 5;
 }
