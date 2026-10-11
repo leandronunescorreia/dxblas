@@ -410,9 +410,9 @@ HRESULT ArenaTexture::readback_float(
 
     const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
     context->CopySubresourceRegion(
-        gpu_mem_staging_.Get(), 0, 0, 0, 0, source->texture.Get(), 0, &used_region);
+        shared_staging_.Get(), 0, 0, 0, 0, source->texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = context->Map(gpu_mem_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
 
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
@@ -425,7 +425,7 @@ HRESULT ArenaTexture::readback_float(
                     row_count * sizeof(float));
         copied += row_count;
     }
-    context->Unmap(gpu_mem_staging_.Get(), 0);
+    context->Unmap(shared_staging_.Get(), 0);
     return copied == count ? S_OK : E_FAIL;
 }
 
@@ -515,17 +515,17 @@ HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UI
     if (!device_ || format == DXGI_FORMAT_UNKNOWN || width == 0 || height == 0)
         return E_INVALIDARG;
 
-    const bool reusable = gpu_mem_staging_ && gpu_mem_staging_format_ == format &&
-        gpu_mem_staging_width_ >= width && gpu_mem_staging_height_ >= height;
+    const bool reusable = shared_staging_ && shared_staging_format_ == format &&
+        shared_staging_width_ >= width && shared_staging_height_ >= height;
     if (reusable) return S_OK;
 
     // Grow monotonically for a given format. A format change requires a new
     // staging texture, but retains the largest dimensions already requested.
     UINT allocation_width = width;
     UINT allocation_height = height;
-    if (gpu_mem_staging_format_ == format) {
-        allocation_width = std::max(allocation_width, gpu_mem_staging_width_);
-        allocation_height = std::max(allocation_height, gpu_mem_staging_height_);
+    if (shared_staging_format_ == format) {
+        allocation_width = std::max(allocation_width, shared_staging_width_);
+        allocation_height = std::max(allocation_height, shared_staging_height_);
     }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
@@ -533,10 +533,10 @@ HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UI
         0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
     if (FAILED(hr)) return hr;
 
-    gpu_mem_staging_ = std::move(staging);
-    gpu_mem_staging_format_ = format;
-    gpu_mem_staging_width_ = allocation_width;
-    gpu_mem_staging_height_ = allocation_height;
+    shared_staging_ = std::move(staging);
+    shared_staging_format_ = format;
+    shared_staging_width_ = allocation_width;
+    shared_staging_height_ = allocation_height;
     return S_OK;
 }
 
@@ -554,12 +554,12 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
 
     const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
     context->CopySubresourceRegion(
-        gpu_mem_staging_.Get(), 0, 0, 0, 0, memory.texture.Get(), 0, &used_region);
+        shared_staging_.Get(), 0, 0, 0, 0, memory.texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = context->Map(gpu_mem_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
     const UINT bytes = gpu_mem_bytes(memory.storage_format);
-    if (!bytes) { context->Unmap(gpu_mem_staging_.Get(), 0); return E_INVALIDARG; }
+    if (!bytes) { context->Unmap(shared_staging_.Get(), 0); return E_INVALIDARG; }
     auto* dst = static_cast<std::uint8_t*>(out);
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
     std::size_t remaining = count;
@@ -569,7 +569,7 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
         dst += n * bytes;
         remaining -= n;
     }
-    context->Unmap(gpu_mem_staging_.Get(), 0);
+    context->Unmap(shared_staging_.Get(), 0);
     return remaining == 0 ? S_OK : E_FAIL;
 }
 HRESULT ArenaTexture::copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a,

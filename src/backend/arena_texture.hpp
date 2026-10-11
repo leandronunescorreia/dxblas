@@ -95,12 +95,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> output_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> readback_;
 
-    // One context-owned staging texture shared by all gpuMem readbacks. It is
-    // allocated on first readback and grows/reformats only when required.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> gpu_mem_staging_;
-    DXGI_FORMAT gpu_mem_staging_format_ = DXGI_FORMAT_UNKNOWN;
-    UINT gpu_mem_staging_width_ = 0;
-    UINT gpu_mem_staging_height_ = 0;
+    // One context-owned staging texture shared by gpuMem and GpuArray readbacks.
+    // It is allocated on first readback and grows/reformats only when required.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_staging_;
+    DXGI_FORMAT shared_staging_format_ = DXGI_FORMAT_UNKNOWN;
+    UINT shared_staging_width_ = 0;
+    UINT shared_staging_height_ = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_a_srv_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_b_srv_;
