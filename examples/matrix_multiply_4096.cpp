@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dxblas/device_selection.hpp>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -227,24 +228,10 @@ int main(int argc, char** argv)
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL featureLevel{};
-    const D3D_FEATURE_LEVEL requested[] = {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0
-    };
-    HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        requested, static_cast<UINT>(std::size(requested)),
-        D3D11_SDK_VERSION, &device, &featureLevel, &context);
-    if (hr == E_INVALIDARG) {
-        // Older runtimes may not recognize the 11.1 feature-level enum.
-        const D3D_FEATURE_LEVEL fallback[] = {D3D_FEATURE_LEVEL_11_0};
-        hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-            fallback, 1, D3D11_SDK_VERSION,
-            &device, &featureLevel, &context);
-    }
-    if (!check_hr(hr, "D3D11CreateDevice (hardware GPU)")) {
-        std::cerr << "No WARP fallback is used: the benchmark must measure a GPU.\n";
+    HRESULT hr = dxblas::detail::create_best_d3d11_device(
+        0, device, featureLevel, context);
+    if (!check_hr(hr, "create_best_d3d11_device")) {
+        std::cerr << "No WARP fallback is used: the benchmark must measure a hardware GPU.\n";
         return 1;
     }
 

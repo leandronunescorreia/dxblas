@@ -1,6 +1,7 @@
 #include "backend/d3d11_backend.hpp"
 #include "backend/arena_texture.hpp"
 #include "backend/d3d11_shader_manager.hpp"
+#include <dxblas/device_selection.hpp>
 
 #include <memory>
 #include <algorithm>
@@ -26,37 +27,45 @@ public:
 
     HRESULT step_one_creating_the_device()
     {
-        D3D_FEATURE_LEVEL requested[] = {
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0
-        };
-
         D3D_FEATURE_LEVEL created_level{};
-        HRESULT hr = D3D11CreateDevice(
-            nullptr,
-            driver_type,
-            nullptr,
-            device_flags,
-            requested,
-            ARRAYSIZE(requested),
-            D3D11_SDK_VERSION,
-            &device,
-            &created_level,
-            &context);
+        HRESULT hr = E_FAIL;
 
-        if (FAILED(hr) && (device_flags & D3D11_CREATE_DEVICE_DEBUG)) {
-            device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+        if (driver_type == D3D_DRIVER_TYPE_HARDWARE) {
+            // Enumerate all DXGI adapters and prefer the hardware GPU with the
+            // largest dedicated video-memory budget. Fall through to another
+            // hardware adapter if the preferred device cannot be initialized.
+            hr = create_best_d3d11_device(
+                device_flags, device, created_level, context);
+        } else {
+            // Preserve explicitly requested WARP/reference/software driver modes.
+            const D3D_FEATURE_LEVEL requested[] = {
+                D3D_FEATURE_LEVEL_11_1,
+                D3D_FEATURE_LEVEL_11_0
+            };
+            const D3D_FEATURE_LEVEL fallback[] = { D3D_FEATURE_LEVEL_11_0 };
             hr = D3D11CreateDevice(
-                nullptr,
-                driver_type,
-                nullptr,
-                device_flags,
-                requested,
-                ARRAYSIZE(requested),
-                D3D11_SDK_VERSION,
-                &device,
-                &created_level,
-                &context);
+                nullptr, driver_type, nullptr, device_flags,
+                requested, ARRAYSIZE(requested), D3D11_SDK_VERSION,
+                &device, &created_level, &context);
+            if (hr == E_INVALIDARG) {
+                hr = D3D11CreateDevice(
+                    nullptr, driver_type, nullptr, device_flags,
+                    fallback, ARRAYSIZE(fallback), D3D11_SDK_VERSION,
+                    &device, &created_level, &context);
+            }
+            if (FAILED(hr) && (device_flags & D3D11_CREATE_DEVICE_DEBUG)) {
+                device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+                hr = D3D11CreateDevice(
+                    nullptr, driver_type, nullptr, device_flags,
+                    requested, ARRAYSIZE(requested), D3D11_SDK_VERSION,
+                    &device, &created_level, &context);
+                if (hr == E_INVALIDARG) {
+                    hr = D3D11CreateDevice(
+                        nullptr, driver_type, nullptr, device_flags,
+                        fallback, ARRAYSIZE(fallback), D3D11_SDK_VERSION,
+                        &device, &created_level, &context);
+                }
+            }
         }
 
         if (FAILED(hr))
