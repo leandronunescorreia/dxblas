@@ -62,6 +62,42 @@ HRESULT create_rtv(
     return device->CreateRenderTargetView(texture, &desc, &rtv);
 }
 
+// Upload a tightly packed CPU array without building a padded temporary buffer.
+// UpdateSubresource reads only the source region described by each box, so the
+// final partial row never reads beyond the caller's allocation.
+void upload_contiguous_rows(
+    ID3D11DeviceContext* context,
+    ID3D11Texture2D* texture,
+    const void* data,
+    std::size_t count,
+    UINT width,
+    UINT height,
+    UINT bytes_per_element)
+{
+    const std::size_t full_rows = count / width;
+    const std::size_t tail_elements = count % width;
+    const UINT row_pitch = width * bytes_per_element;
+    const auto* source = static_cast<const std::uint8_t*>(data);
+
+    if (full_rows != 0) {
+        const D3D11_BOX full_rows_box{
+            0, 0, 0, width, static_cast<UINT>(full_rows), 1};
+        context->UpdateSubresource(
+            texture, 0, &full_rows_box, source, row_pitch, 0);
+    }
+
+    if (tail_elements != 0) {
+        const UINT tail_bytes = static_cast<UINT>(tail_elements) * bytes_per_element;
+        const UINT tail_y = static_cast<UINT>(full_rows);
+        const D3D11_BOX tail_row_box{
+            0, tail_y, 0, static_cast<UINT>(tail_elements), tail_y + 1, 1};
+        context->UpdateSubresource(
+            texture, 0, &tail_row_box,
+            source + full_rows * static_cast<std::size_t>(row_pitch),
+            tail_bytes, 0);
+    }
+}
+
 } // namespace
 
 HRESULT ArenaTexture::initialize(
@@ -381,16 +417,8 @@ HRESULT ArenaTexture::upload_float(
     HRESULT hr = acquire_float(count, out);
     if (FAILED(hr)) return hr;
 
-    const std::size_t capacity = static_cast<std::size_t>(out->width) * out->height;
-    if (capacity == count) {
-        context->UpdateSubresource(out->texture.Get(), 0, nullptr, data,
-            out->width * static_cast<UINT>(sizeof(float)), 0);
-    } else {
-        std::vector<float> padded(capacity, 0.0f);
-        std::memcpy(padded.data(), data, count * sizeof(float));
-        context->UpdateSubresource(out->texture.Get(), 0, nullptr, padded.data(),
-            out->width * static_cast<UINT>(sizeof(float)), 0);
-    }
+    upload_contiguous_rows(context, out->texture.Get(), data, count,
+        out->width, out->height, static_cast<UINT>(sizeof(float)));
     return S_OK;
 }
 
@@ -495,18 +523,8 @@ HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& m
     HRESULT hr = prepare_gpu_mem(memory, memory.storage_format, count);
     if (FAILED(hr)) return hr;
     const UINT bytes = gpu_mem_bytes(memory.storage_format);
-    const std::size_t capacity = static_cast<std::size_t>(memory.width) * memory.height;
-    if (capacity == count) {
-        // Common case: the caller's payload exactly covers the texture, so
-        // UpdateSubresource can upload directly without an intermediate CPU copy.
-        context->UpdateSubresource(memory.texture.Get(), 0, nullptr, data, memory.width * bytes, 0);
-    } else {
-        // D3D11 reads the full final row, so pad only partial textures to avoid
-        // reading past the caller's allocation.
-        std::vector<std::uint8_t> padded(capacity * bytes, 0);
-        std::memcpy(padded.data(), data, count * bytes);
-        context->UpdateSubresource(memory.texture.Get(), 0, nullptr, padded.data(), memory.width * bytes, 0);
-    }
+    upload_contiguous_rows(context, memory.texture.Get(), data, count,
+        memory.width, memory.height, bytes);
     return S_OK;
 }
 
@@ -611,10 +629,8 @@ HRESULT ArenaTexture::create_gpu_buffer(
     texture->width = width; texture->height = static_cast<UINT>(h); texture->count = count;
     texture->storage_format = format;
     if (data) {
-        const std::size_t capacity = static_cast<std::size_t>(width) * h;
-        std::vector<std::uint8_t> padded(capacity * bytes, 0);
-        std::memcpy(padded.data(), data, count * bytes);
-        context->UpdateSubresource(texture->texture.Get(), 0, nullptr, padded.data(), width * bytes, 0);
+        upload_contiguous_rows(context, texture->texture.Get(), data, count,
+            width, static_cast<UINT>(h), bytes);
     }
     out = std::move(texture);
     return S_OK;
