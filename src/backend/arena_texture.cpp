@@ -116,6 +116,43 @@ void upload_contiguous_rows(
     }
 }
 
+// Copy a mapped, row-pitched texture region into a tightly packed CPU array.
+// The caller must Unmap the resource after this helper returns, on both success
+// and failure paths.
+HRESULT copy_mapped_to_cpu(
+    const D3D11_MAPPED_SUBRESOURCE& mapped,
+    void* destination,
+    std::size_t count,
+    UINT row_elements,
+    UINT rows,
+    UINT bytes)
+{
+    if (!mapped.pData || !destination || count == 0 || row_elements == 0 ||
+        rows == 0 || bytes == 0 ||
+        count > static_cast<std::size_t>(row_elements) * rows)
+        return E_INVALIDARG;
+
+    const std::size_t total_bytes = count * bytes;
+    auto* dst = static_cast<std::uint8_t*>(destination);
+    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+
+    if (rows == 1 || mapped.RowPitch == static_cast<std::size_t>(row_elements) * bytes) {
+        std::memcpy(dst, src, total_bytes);
+        return S_OK;
+    }
+
+    std::size_t remaining = count;
+    for (UINT row = 0; row < rows && remaining != 0; ++row) {
+        const std::size_t row_count = std::min<std::size_t>(remaining, row_elements);
+        std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch,
+                    row_count * bytes);
+        dst += row_count * bytes;
+        remaining -= row_count;
+    }
+
+    return remaining == 0 ? S_OK : E_FAIL;
+}
+
 } // namespace
 
 UINT bytes_per_element(DXGI_FORMAT format)
@@ -356,54 +393,38 @@ HRESULT ArenaTexture::readback(
     if (FAILED(hr))
         return hr;
 
-    const UINT last_row_elements = elements - (height - 1u) * width;
-    auto* dst = static_cast<std::uint8_t*>(destination);
-    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
+    HRESULT copy_hr = S_OK;
+    if (!packed_integer) {
+        copy_hr = copy_mapped_to_cpu(
+            mapped, destination, elements, width, height, bytes_per_element);
+    } else {
+        const UINT last_row_elements = elements - (height - 1u) * width;
+        auto* dst = static_cast<std::uint8_t*>(destination);
+        const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
 
-    // D3D11 may pad mapped rows. If it did not, copy the complete payload
-    // in one operation instead of issuing one memcpy per row.
-    const std::size_t tight_row_bytes =
-        static_cast<std::size_t>(width) * bytes_per_element;
-    if (!packed_integer && mapped.RowPitch == tight_row_bytes) {
-        std::memcpy(dst, src, static_cast<std::size_t>(elements) * bytes_per_element);
-        context->Unmap(shared_staging_.Get(), 0);
-        return S_OK;
-    }
-
-    for (UINT y = 0; y < height; ++y) {
-        const UINT row_elements =
-            (y + 1u == height) ? last_row_elements : width;
-
-        auto* row_dst =
-            dst + static_cast<std::size_t>(y) * width * bytes_per_element;
-        const auto* row_src =
-            src + static_cast<std::size_t>(y) * mapped.RowPitch;
-
-        if (!packed_integer) {
-            std::memcpy(
-                row_dst,
-                row_src,
-                static_cast<std::size_t>(row_elements) * bytes_per_element);
-            continue;
-        }
-
-        for (UINT x = 0; x < row_elements; ++x) {
-            const auto* pixel = row_src + static_cast<std::size_t>(x) * 4u;
-            const std::uint32_t value =
-                static_cast<std::uint32_t>(pixel[0]) |
-                (static_cast<std::uint32_t>(pixel[1]) << 8) |
-                (static_cast<std::uint32_t>(pixel[2]) << 16) |
-                (static_cast<std::uint32_t>(pixel[3]) << 24);
-
-            std::memcpy(
-                row_dst + static_cast<std::size_t>(x) * bytes_per_element,
-                &value,
-                bytes_per_element);
+        // Packed integer render targets require channel reconstruction rather
+        // than a byte-for-byte row copy, so retain their format-specific path.
+        for (UINT y = 0; y < height; ++y) {
+            const UINT row_count = (y + 1u == height) ? last_row_elements : width;
+            auto* row_dst = dst + static_cast<std::size_t>(y) * width * bytes_per_element;
+            const auto* row_src = src + static_cast<std::size_t>(y) * mapped.RowPitch;
+            for (UINT x = 0; x < row_count; ++x) {
+                const auto* pixel = row_src + static_cast<std::size_t>(x) * 4u;
+                const std::uint32_t value =
+                    static_cast<std::uint32_t>(pixel[0]) |
+                    (static_cast<std::uint32_t>(pixel[1]) << 8) |
+                    (static_cast<std::uint32_t>(pixel[2]) << 16) |
+                    (static_cast<std::uint32_t>(pixel[3]) << 24);
+                std::memcpy(
+                    row_dst + static_cast<std::size_t>(x) * bytes_per_element,
+                    &value, bytes_per_element);
+            }
         }
     }
 
+    // Every successful Map is paired with Unmap before propagating the copy result.
     context->Unmap(shared_staging_.Get(), 0);
-    return S_OK;
+    return copy_hr;
 }
 
 
@@ -503,26 +524,10 @@ HRESULT ArenaTexture::readback_float(
     hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
 
-    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-    auto* dst = static_cast<std::uint8_t*>(destination);
-    const std::size_t tight_row_bytes =
-        static_cast<std::size_t>(copied_width) * sizeof(float);
-    if (mapped.RowPitch == tight_row_bytes) {
-        std::memcpy(dst, src, count * sizeof(float));
-        context->Unmap(shared_staging_.Get(), 0);
-        return S_OK;
-    }
-
-    std::size_t copied = 0;
-    for (UINT y = 0; y < rows && copied < count; ++y) {
-        const std::size_t row_count = std::min<std::size_t>(source->width, count - copied);
-        std::memcpy(dst + copied * sizeof(float),
-                    src + static_cast<std::size_t>(y) * mapped.RowPitch,
-                    row_count * sizeof(float));
-        copied += row_count;
-    }
+    const HRESULT copy_hr = copy_mapped_to_cpu(
+        mapped, destination, count, copied_width, rows, static_cast<UINT>(sizeof(float)));
     context->Unmap(shared_staging_.Get(), 0);
-    return copied == count ? S_OK : E_FAIL;
+    return copy_hr;
 }
 
 
@@ -669,26 +674,11 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
     hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
     const UINT bytes = bytes_per_element(memory.storage_format);
-    if (!bytes) { context->Unmap(shared_staging_.Get(), 0); return E_INVALIDARG; }
-    auto* dst = static_cast<std::uint8_t*>(out);
-    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-    const std::size_t tight_row_bytes =
-        static_cast<std::size_t>(copied_width) * bytes;
-    if (mapped.RowPitch == tight_row_bytes) {
-        std::memcpy(dst, src, count * bytes);
-        context->Unmap(shared_staging_.Get(), 0);
-        return S_OK;
-    }
-
-    std::size_t remaining = count;
-    for (UINT row = 0; remaining && row < rows; ++row) {
-        const std::size_t n = std::min<std::size_t>(remaining, memory.width);
-        std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, n * bytes);
-        dst += n * bytes;
-        remaining -= n;
-    }
+    const HRESULT copy_hr = bytes
+        ? copy_mapped_to_cpu(mapped, out, count, copied_width, rows, bytes)
+        : E_INVALIDARG;
     context->Unmap(shared_staging_.Get(), 0);
-    return remaining == 0 ? S_OK : E_FAIL;
+    return copy_hr;
 }
 HRESULT ArenaTexture::readback_gpu_mem_batch(
     ID3D11DeviceContext* context,
