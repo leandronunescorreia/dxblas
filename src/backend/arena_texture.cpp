@@ -254,7 +254,16 @@ HRESULT ArenaTexture::readback(
     UINT bytes_per_element,
     bool packed_integer)
 {
-    context->CopyResource(readback_.Get(), output_.Get());
+    if (!context || !destination || !readback_ || !output_ ||
+        width == 0 || height == 0 || elements == 0 ||
+        width > capacity_width_ || height > capacity_height_)
+        return E_INVALIDARG;
+
+    // Copy only the rendered rectangle. The staging texture may be much larger
+    // than this operation (for example, a 4096x4096 arena for a tiny sum).
+    const D3D11_BOX used_region{0, 0, 0, width, height, 1};
+    context->CopySubresourceRegion(
+        readback_.Get(), 0, 0, 0, 0, output_.Get(), 0, &used_region);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     HRESULT hr = context->Map(
@@ -391,9 +400,15 @@ HRESULT ArenaTexture::readback_float(
     ID3D11DeviceContext* context, const std::shared_ptr<gpuMemBase>& source,
     void* destination, std::size_t count)
 {
-    if (!context || !source || !destination || count != source->count)
+    if (!context || !source || !destination || count != source->count ||
+        !source->staging || !source->texture || count == 0 || source->width == 0)
         return E_INVALIDARG;
-    context->CopyResource(source->staging.Get(), source->texture.Get());
+
+    const UINT rows = static_cast<UINT>((count + source->width - 1u) / source->width);
+    const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, source->width));
+    const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
+    context->CopySubresourceRegion(
+        source->staging.Get(), 0, 0, 0, 0, source->texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     HRESULT hr = context->Map(source->staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
@@ -495,9 +510,16 @@ HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& m
 HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory,
                                        void* out, std::size_t count)
 {
-    if (!context || !memory.texture.Get() || !memory.staging.Get() || !out || count == 0 || count > memory.count)
+    if (!context || !memory.texture.Get() || !memory.staging.Get() || !out ||
+        count == 0 || count > memory.count || memory.width == 0)
         return E_INVALIDARG;
-    context->CopyResource(memory.staging.Get(), memory.texture.Get());
+
+    // Transfer only rows containing live elements; do not copy the entire arena.
+    const UINT rows = static_cast<UINT>((count + memory.width - 1u) / memory.width);
+    const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, memory.width));
+    const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
+    context->CopySubresourceRegion(
+        memory.staging.Get(), 0, 0, 0, 0, memory.texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     HRESULT hr = context->Map(memory.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;
@@ -583,14 +605,18 @@ HRESULT ArenaTexture::readback_gpu_buffer(
 {
     if (!context || !opaque || !out || count == 0) return E_INVALIDARG;
     auto texture = std::static_pointer_cast<gpuMemBase>(opaque);
-    if (count > texture->count) return E_INVALIDARG;
+    if (count > texture->count || texture->width == 0) return E_INVALIDARG;
     D3D11_TEXTURE2D_DESC desc{}; texture->texture->GetDesc(&desc);
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
     HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &staging);
     if (FAILED(hr)) return hr;
-    context->CopyResource(staging.Get(), texture->texture.Get());
+    const UINT rows = static_cast<UINT>((count + texture->width - 1u) / texture->width);
+    const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, texture->width));
+    const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
+    context->CopySubresourceRegion(
+        staging.Get(), 0, 0, 0, 0, texture->texture.Get(), 0, &used_region);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) return hr;

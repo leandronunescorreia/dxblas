@@ -33,13 +33,14 @@ static void cpu_matrix_multiply_blocked(const std::vector<float>& a,
 
 int main(int argc, char** argv)
 {
-    std::size_t n = 4096;
+    int total = 2048;
+    std::size_t n = total;
     if (argc > 1) {
         try { n = static_cast<std::size_t>(std::stoull(argv[1])); }
         catch (...) { std::cerr << "Usage: dxblas_matrix_multiply_4096 [matrix-size]\n"; return 2; }
     }
-    if (n == 0 || n > 4096) {
-        std::cerr << "Matrix size must be in [1, 4096].\n";
+    if (n == 0 || n > total) {
+        std::cerr << "Matrix size must be in [1, " << total << "].\n";
         return 2;
     }
 

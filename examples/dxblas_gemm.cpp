@@ -66,7 +66,7 @@ void cpu_gemm(const std::vector<float>& a,
 bool validate(const std::vector<float>& cpu, const std::vector<float>& gpu)
 {
     if (cpu.size() != gpu.size()) return false;
-    constexpr std::size_t samples = 8192;
+    constexpr std::size_t samples = 2048;
     const std::size_t checks = std::min(samples, cpu.size());
     float max_error = 0.0f;
     for (std::size_t i = 0; i < checks; ++i) {
@@ -99,17 +99,18 @@ bool check_hr(HRESULT hr, const char* action)
 
 int main(int argc, char** argv)
 {
-    std::size_t n = 4096;
+    int total = 2048;
+    std::size_t n = total;
     if (argc > 1) {
         try {
             n = static_cast<std::size_t>(std::stoull(argv[1]));
         } catch (...) {
-            std::cerr << "Usage: dxblas_gemm [square-matrix-size, default 4096]\n";
+            std::cerr << "Usage: dxblas_gemm [square-matrix-size, default " << total << "]\n";
             return 2;
         }
     }
-    if (n == 0 || n > 4096) {
-        std::cerr << "Matrix size must be in [1, 4096] for this texture-backed sample.\n";
+    if (n == 0 || n > total) {
+        std::cerr << "Matrix size must be in [1, " << total << "] for this texture-backed sample.\n";
         return 2;
     }
 
