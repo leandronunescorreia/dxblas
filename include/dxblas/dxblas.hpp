@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
-#include <initializer_list>
 #include <type_traits>
 #include <vector>
 
@@ -61,38 +60,46 @@ class gpuMem : public gpuMemBase {
         "gpuMem<T> supports uint8_t, int16_t, int32_t, dxblas::float16 and float");
 public:
     using value_type = T;
-    gpuMem() { storage_format = gpu_mem_traits<T>::format; }
-    explicit gpuMem(std::size_t element_count) : host_data_(element_count) { count = element_count; storage_format = gpu_mem_traits<T>::format; }
-    gpuMem(const T* data, std::size_t element_count) { storage_format = gpu_mem_traits<T>::format; assign(data, element_count); }
-    explicit gpuMem(const std::vector<T>& data) : host_data_(data) { count = data.size(); storage_format = gpu_mem_traits<T>::format; }
-    gpuMem(std::initializer_list<T> data) : host_data_(data) { count = data.size(); storage_format = gpu_mem_traits<T>::format; }
 
-    void assign(const T* data, std::size_t count) {
-        if (count != 0 && data == nullptr) throw std::invalid_argument("gpuMem data must not be null");
-        texture.Reset(); srv.Reset(); rtv.Reset();
-        width = height = 0;
-        this->count = count; storage_format = gpu_mem_traits<T>::format;
-        if (count == 0) { host_data_.clear(); return; }
-        host_data_.assign(data, data + count);
+    gpuMem() { storage_format = gpu_mem_traits<T>::format; }
+    explicit gpuMem(std::size_t element_count) {
+        count = element_count;
+        storage_format = gpu_mem_traits<T>::format;
     }
+    gpuMem(const T* data, std::size_t element_count) {
+        storage_format = gpu_mem_traits<T>::format;
+        assign(data, element_count);
+    }
+    // Non-owning: the vector's storage must remain alive and stable until Context::copy uploads it.
+    explicit gpuMem(const std::vector<T>& data) {
+        storage_format = gpu_mem_traits<T>::format;
+        assign(data.data(), data.size());
+    }
+    gpuMem(std::vector<T>&&) = delete;
+
+    // Retain only the caller's pointer; no CPU payload allocation or memcpy occurs here.
+    // The caller must keep [data, data + element_count) valid until the next upload operation.
+    void assign(const T* data, std::size_t element_count) {
+        if (element_count != 0 && data == nullptr)
+            throw std::invalid_argument("gpuMem data must not be null");
+        pending_data_ = element_count == 0 ? nullptr : data;
+        count = element_count;
+        storage_format = gpu_mem_traits<T>::format;
+    }
+
     void assign(const std::vector<T>& data) { assign(data.data(), data.size()); }
     std::size_t size() const noexcept { return count; }
     bool empty() const noexcept { return count == 0; }
     DXGI_FORMAT format() const noexcept { return gpu_mem_traits<T>::format; }
     bool resident() const noexcept { return texture.Get() != nullptr; }
-
-    // Before Context::copy this is the CPU upload payload. After a successful
-    // copy, the payload is discarded and this object owns its GPU resources.
-    const T* data() const noexcept { return host_data_.empty() ? nullptr : host_data_.data(); }
-    const void* cpu_data() const noexcept override { return data(); }
-    std::vector<T>& host_data() noexcept { return host_data_; }
-    const std::vector<T>& host_data() const noexcept { return host_data_; }
+    const T* data() const noexcept { return pending_data_; }
+    const void* cpu_data() const noexcept override { return pending_data_; }
 
 private:
     friend class Context;
-    std::vector<T> host_data_;
+    void release_pending_data() noexcept { pending_data_ = nullptr; }
+    const T* pending_data_ = nullptr;
 };
-
 // A reference-counted GPU-resident float array. Its texture storage is returned
 // to the context-owned texture arena when the last handle is released.
 class GpuArray {
@@ -168,9 +175,9 @@ public:
         if (!a.data() || !b.data()) return E_INVALIDARG;
         HRESULT hr = backend_->copy_gpu_mem(a, b, out, element_count);
         if (FAILED(hr)) return hr;
-        a.host_data_.clear(); a.host_data_.shrink_to_fit();
-        b.host_data_.clear(); b.host_data_.shrink_to_fit();
-        out.host_data_.clear(); out.host_data_.shrink_to_fit();
+        a.release_pending_data();
+        b.release_pending_data();
+        out.release_pending_data();
         a.count = b.count = out.count = element_count;
         return S_OK;
     }
@@ -198,8 +205,7 @@ public:
     }
 
     // GPU-resident row-major FP32 GEMM: C[M,N] = A[M,K] * B[K,N].
-    // The caller uploads A, B and C with Context::copy first; GEMM then
-    // consumes their resident texture resources without another CPU upload.
+    // Inputs and output must already be resident; no CPU upload occurs here.
     HRESULT gemm(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& out,
                  std::size_t m, std::size_t n, std::size_t k)
     {
