@@ -18,6 +18,10 @@ namespace dxblas::detail {
 
 class D3D11Backend::Impl {
 public:
+    struct GemmConstants {
+        UINT m, n, k, a_width, b_width, out_width, padding0, padding1;
+    };
+
     Impl(D3D_DRIVER_TYPE driver_type, UINT device_flags)
         : driver_type(driver_type),
           device_flags(device_flags)
@@ -230,6 +234,23 @@ public:
         return S_OK;
     }
 
+    HRESULT update_gemm_constant_buffer(const GemmConstants& constants)
+    {
+        if (!gemm_constant_buffer) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(GemmConstants);
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = device->CreateBuffer(&bd, nullptr, &gemm_constant_buffer);
+            if (FAILED(hr))
+                return hr;
+        }
+
+        // Reuse the same DEFAULT-usage constant buffer for both GEMM paths.
+        context->UpdateSubresource(gemm_constant_buffer.Get(), 0, nullptr, &constants, 0, 0);
+        return S_OK;
+    }
+
     HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out,
                          std::size_t m, std::size_t n, std::size_t k)
     {
@@ -252,15 +273,10 @@ public:
         hr = compile_shaders(BinaryOp::Gemm, DXGI_FORMAT_R32_FLOAT, vs, ps);
         if (FAILED(hr)) return hr;
 
-        struct GemmConstants { UINT m, n, k, a_width, b_width, out_width, padding0, padding1; };
         const GemmConstants constants{static_cast<UINT>(m), static_cast<UINT>(n), static_cast<UINT>(k),
             a.width, b.width, out.width, 0, 0};
-        D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = sizeof(constants); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        ComPtr<ID3D11Buffer> cb;
-        hr = device->CreateBuffer(&bd, nullptr, &cb);
+        hr = update_gemm_constant_buffer(constants);
         if (FAILED(hr)) return hr;
-        context->UpdateSubresource(cb.Get(), 0, nullptr, &constants, 0, 0);
 
         D3D11_VIEWPORT vp{};
         vp.Width = static_cast<float>(out.width); vp.Height = 1.0f;
@@ -273,7 +289,7 @@ public:
         context->PSSetShader(ps.Get(), nullptr, 0);
         ID3D11ShaderResourceView* srvs[] = {a.srv.Get(), b.srv.Get()};
         context->PSSetShaderResources(0, 2, srvs);
-        ID3D11Buffer* cbs[] = {cb.Get()};
+        ID3D11Buffer* cbs[] = {gemm_constant_buffer.Get()};
         context->PSSetConstantBuffers(0, 1, cbs);
         // Bound each draw to a small number of output rows to avoid long-running
         // pixel-shader workloads triggering the Windows GPU timeout detector.
@@ -371,16 +387,13 @@ public:
         hr = arena_texture.upload_matrix_float(context.Get(), a, inner, rows, ma); if (FAILED(hr)) return hr;
         hr = arena_texture.upload_matrix_float(context.Get(), b, cols, inner, mb); if (FAILED(hr)) return hr;
         hr = arena_texture.acquire_matrix_float(cols, rows, mc); if (FAILED(hr)) return hr;
-        struct Constants { UINT m, n, k, a_width, b_width, out_width, padding0, padding1; }
-            constants{rows, cols, inner, inner, cols, cols, 0, 0};
-        D3D11_BUFFER_DESC bd{}; bd.ByteWidth = sizeof(Constants); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        ComPtr<ID3D11Buffer> cb;
-        hr = device->CreateBuffer(&bd, nullptr, &cb); if (FAILED(hr)) return hr;
-        context->UpdateSubresource(cb.Get(), 0, nullptr, &constants, 0, 0);
+        const GemmConstants constants{rows, cols, inner, inner, cols, cols, 0, 0};
+        hr = update_gemm_constant_buffer(constants);
+        if (FAILED(hr)) return hr;
         context->IASetInputLayout(nullptr); context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(vs.Get(), nullptr, 0); context->PSSetShader(ps.Get(), nullptr, 0);
         ID3D11ShaderResourceView* srvs[] = {ma->srv.Get(), mb->srv.Get()}; context->PSSetShaderResources(0, 2, srvs);
-        ID3D11Buffer* cbs[] = {cb.Get()}; context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11Buffer* cbs[] = {gemm_constant_buffer.Get()}; context->PSSetConstantBuffers(0, 1, cbs);
         ID3D11RenderTargetView* rtv = mc->rtv.Get(); context->OMSetRenderTargets(1, &rtv, nullptr);
         constexpr UINT rows_per_draw = 8;
         for (UINT start = 0; start < rows; start += rows_per_draw) {
@@ -420,6 +433,7 @@ public:
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11Buffer> gemm_constant_buffer;
     D3D11ShaderManager shader_manager;
     ArenaTexture arena_texture;
 };
