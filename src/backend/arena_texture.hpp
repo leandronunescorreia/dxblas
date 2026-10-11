@@ -99,9 +99,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
 
-    // Shared staging resource for sequential single-buffer readbacks. Batched
-    // readbacks use independent staging textures so all copies can be queued
-    // before any Map operation.
+    // Shared staging resource for sequential and batched readbacks. Batch requests
+    // are packed into separate vertical regions and mapped once per format/pass.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_staging_;
     DXGI_FORMAT shared_staging_format_ = DXGI_FORMAT_UNKNOWN;
     UINT shared_staging_width_ = 0;

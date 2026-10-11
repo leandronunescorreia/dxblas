@@ -646,18 +646,24 @@ HRESULT ArenaTexture::readback_gpu_mem_batch(
 
     struct PendingReadback {
         const GpuMemReadbackRequest* request = nullptr;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
         UINT copied_width = 0;
         UINT rows = 0;
         UINT bytes_per_element = 0;
     };
+    struct ReadbackGroup {
+        DXGI_FORMAT staging_format = DXGI_FORMAT_UNKNOWN;
+        // Keep a typed representative format for ensure_readback_staging;
+        // staging_format_for() maps it to this group's typeless format.
+        DXGI_FORMAT representative_format = DXGI_FORMAT_UNKNOWN;
+        std::vector<PendingReadback> items;
+    };
 
-    std::vector<PendingReadback> pending;
-    pending.reserve(requests.size());
+    // Validate and prepare every request before issuing any GPU copy. This also
+    // ensures a bad later request cannot leave earlier copies queued.
+    std::vector<ReadbackGroup> groups;
+    groups.reserve(requests.size());
+    const UINT max_dimension = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
 
-    // Allocate staging resources and enqueue every GPU copy before the first Map.
-    // Each source needs its own staging texture so later copies cannot overwrite
-    // data waiting to be read from an earlier source.
     for (const auto& request : requests) {
         if (request.count == 0) continue;
         if (!request.source || !request.destination || !request.source->texture.Get() ||
@@ -666,62 +672,103 @@ HRESULT ArenaTexture::readback_gpu_mem_batch(
             return E_INVALIDARG;
 
         const UINT bytes = bytes_per_element(request.source->storage_format);
-        if (bytes == 0) return E_INVALIDARG;
-
-        const UINT copied_width = static_cast<UINT>(
-            std::min<std::size_t>(request.count, request.source->width));
-        const std::size_t row_count = (request.count + copied_width - 1u) / copied_width;
-        if (row_count > request.source->height || row_count > (std::numeric_limits<UINT>::max)())
+        const DXGI_FORMAT staging_format = staging_format_for(request.source->storage_format);
+        if (bytes == 0 || staging_format == DXGI_FORMAT_UNKNOWN)
             return E_INVALIDARG;
-        const UINT rows = static_cast<UINT>(row_count);
+
+        const std::size_t source_width = request.source->width;
+        const std::size_t row_count = request.count / source_width +
+            (request.count % source_width != 0 ? 1u : 0u);
+        if (row_count == 0 || row_count > request.source->height || row_count > max_dimension)
+            return E_INVALIDARG;
 
         PendingReadback item;
         item.request = &request;
-        item.copied_width = copied_width;
-        item.rows = rows;
+        item.copied_width = static_cast<UINT>(std::min<std::size_t>(request.count, source_width));
+        item.rows = static_cast<UINT>(row_count);
         item.bytes_per_element = bytes;
-        HRESULT hr = create_texture(device_.Get(), copied_width, rows,
-            request.source->storage_format, 0, D3D11_USAGE_STAGING,
-            D3D11_CPU_ACCESS_READ, item.staging);
-        if (FAILED(hr)) return hr;
 
-        const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
-        context->CopySubresourceRegion(item.staging.Get(), 0, 0, 0, 0,
-            request.source->texture.Get(), 0, &used_region);
-        pending.push_back(std::move(item));
-    }
-
-    // All copies are queued. Map each staging texture only now, so the runtime
-    // can overlap/submit the transfer work instead of stalling between copies.
-    for (auto& item : pending) {
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr = context->Map(item.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-        if (FAILED(hr)) return hr;
-
-        const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-        auto* dst = static_cast<std::uint8_t*>(item.request->destination);
-        const std::size_t tight_row_bytes =
-            static_cast<std::size_t>(item.copied_width) * item.bytes_per_element;
-        if (mapped.RowPitch == tight_row_bytes) {
-            std::memcpy(dst, src, item.request->count * item.bytes_per_element);
+        auto group_it = std::find_if(groups.begin(), groups.end(),
+            [staging_format](const ReadbackGroup& group) {
+                return group.staging_format == staging_format;
+            });
+        if (group_it == groups.end()) {
+            ReadbackGroup group;
+            group.staging_format = staging_format;
+            group.representative_format = request.source->storage_format;
+            group.items.push_back(item);
+            groups.push_back(std::move(group));
         } else {
-            std::size_t remaining = item.request->count;
-            for (UINT row = 0; remaining && row < item.rows; ++row) {
-                const std::size_t elements = std::min<std::size_t>(remaining, item.copied_width);
-                const std::size_t row_bytes = elements * item.bytes_per_element;
-                std::memcpy(dst, src + static_cast<std::size_t>(row) * mapped.RowPitch, row_bytes);
-                dst += row_bytes;
-                remaining -= elements;
-            }
-            context->Unmap(item.staging.Get(), 0);
-            if (remaining != 0) return E_FAIL;
-            continue;
+            group_it->items.push_back(item);
         }
-        context->Unmap(item.staging.Get(), 0);
     }
+
+    if (groups.empty()) return S_OK;
+
+    // A pass packs requests vertically into one shared staging texture. Split
+    // a group when the sum of its row counts would exceed the D3D11 dimension.
+    for (const auto& group : groups) {
+        std::size_t pass_begin = 0;
+        while (pass_begin < group.items.size()) {
+            std::size_t pass_end = pass_begin;
+            UINT staging_width = 0;
+            UINT staging_height = 0;
+            while (pass_end < group.items.size()) {
+                const PendingReadback& item = group.items[pass_end];
+                if (item.rows > max_dimension) return E_INVALIDARG;
+                if (staging_height != 0 && item.rows > max_dimension - staging_height)
+                    break;
+                staging_width = std::max(staging_width, item.copied_width);
+                staging_height += item.rows;
+                ++pass_end;
+            }
+            if (pass_end == pass_begin || staging_width == 0 || staging_height == 0)
+                return E_INVALIDARG;
+
+            HRESULT hr = ensure_readback_staging(
+                group.representative_format, staging_width, staging_height);
+            if (FAILED(hr)) return hr;
+
+            UINT dst_y = 0;
+            for (std::size_t i = pass_begin; i < pass_end; ++i) {
+                const PendingReadback& item = group.items[i];
+                const D3D11_BOX used_region{
+                    0, 0, 0, item.copied_width, item.rows, 1};
+                context->CopySubresourceRegion(
+                    shared_staging_.Get(), 0, 0, dst_y, 0,
+                    item.request->source->texture.Get(), 0, &used_region);
+                dst_y += item.rows;
+            }
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            hr = context->Map(shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+            if (FAILED(hr)) return hr;
+
+            HRESULT copy_result = S_OK;
+            UINT src_y = 0;
+            for (std::size_t i = pass_begin; i < pass_end; ++i) {
+                const PendingReadback& item = group.items[i];
+                D3D11_MAPPED_SUBRESOURCE request_mapped = mapped;
+                request_mapped.pData = static_cast<std::uint8_t*>(mapped.pData) +
+                    static_cast<std::size_t>(src_y) * mapped.RowPitch;
+                const HRESULT item_result = copy_mapped_to_cpu(
+                    request_mapped, item.request->destination, item.request->count,
+                    item.copied_width, item.rows, item.bytes_per_element);
+                if (FAILED(item_result)) {
+                    copy_result = item_result;
+                    break;
+                }
+                src_y += item.rows;
+            }
+            context->Unmap(shared_staging_.Get(), 0);
+            if (FAILED(copy_result)) return copy_result;
+
+            pass_begin = pass_end;
+        }
+    }
+
     return S_OK;
 }
-
 HRESULT ArenaTexture::copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a,
                                              gpuMemBase& b, gpuMemBase& out, std::size_t count)
 {
