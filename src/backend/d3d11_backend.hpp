@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 #include <d3d11.h>
 #include <dxgiformat.h>
@@ -44,6 +45,7 @@ public:
 
     HRESULT copy_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT readback_gpu_mem(gpuMemBase& source, void* out, std::size_t count) override;
+    HRESULT readback_gpu_mem_batch(const std::vector<GpuMemReadbackRequest>& requests) override;
     HRESULT sum_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m, std::size_t n, std::size_t k) override;

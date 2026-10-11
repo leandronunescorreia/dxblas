@@ -57,16 +57,14 @@ static int run_scenario(dxblas::Context& context,
     std::vector<T> roundtrip_b(cpu_b.size());
 
     const auto readback_start = Clock::now();
-    hr = context.copy_to_cpu(a, roundtrip_a.data(), roundtrip_a.size());
-    if (FAILED(hr)) {
-        print_hresult((label + " GPU -> CPU readback a").c_str(), hr);
-        return 3;
-    }
-    hr = context.copy_to_cpu(b, roundtrip_b.data(), roundtrip_b.size());
+    hr = context.copy_to_cpu_batch({
+        {&a, roundtrip_a.data(), roundtrip_a.size()},
+        {&b, roundtrip_b.data(), roundtrip_b.size()},
+    });
     const auto readback_end = Clock::now();
     if (FAILED(hr)) {
-        print_hresult((label + " GPU -> CPU readback b").c_str(), hr);
-        return 4;
+        print_hresult((label + " batched GPU -> CPU readback").c_str(), hr);
+        return 3;
     }
 
     for (std::size_t i = 0; i < cpu_a.size(); ++i) {

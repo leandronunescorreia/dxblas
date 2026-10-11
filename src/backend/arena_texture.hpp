@@ -61,7 +61,9 @@ public:
     HRESULT copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count);
     HRESULT upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory, const void* data, std::size_t count);
     HRESULT prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, std::size_t count);
+    HRESULT prepare_gpu_mem_matrix(gpuMemBase& memory, DXGI_FORMAT format, UINT width, UINT height);
     HRESULT readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory, void* out, std::size_t count);
+    HRESULT readback_gpu_mem_batch(ID3D11DeviceContext* context, const std::vector<GpuMemReadbackRequest>& requests);
 
     HRESULT create_gpu_buffer(
         ID3D11DeviceContext* context, DXGI_FORMAT format, const void* data,
@@ -90,17 +92,18 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> input_a_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> input_b_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> output_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> readback_;
-
-    // One context-owned staging texture shared by gpuMem and GpuArray readbacks.
-    // It is allocated on first readback and grows/reformats only when required.
+    // Shared staging resource for sequential single-buffer readbacks. Batched
+    // readbacks use independent staging textures so all copies can be queued
+    // before any Map operation.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_staging_;
     DXGI_FORMAT shared_staging_format_ = DXGI_FORMAT_UNKNOWN;
     UINT shared_staging_width_ = 0;
     UINT shared_staging_height_ = 0;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> input_a_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> input_b_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> output_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> readback_;
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_a_srv_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_b_srv_;
@@ -110,7 +113,6 @@ private:
     DXGI_FORMAT output_format_ = DXGI_FORMAT_UNKNOWN;
     UINT capacity_width_ = 0;
     UINT capacity_height_ = 0;
-    UINT max_dimension_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     std::vector<std::shared_ptr<gpuMemBase>> gpu_slots_;
 };
 

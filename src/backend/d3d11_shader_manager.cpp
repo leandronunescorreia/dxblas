@@ -67,6 +67,8 @@ DTYPE main(PSInput input) : SV_Target { int2 p=int2(input.position.xy); return i
 // Embedded fallback so GEMM does not depend on the process working directory.
 // The external src/shaders/gemm.hlsl remains the editable source of record.
 constexpr const char* kGemmPixelShaderSource = R"(
+// Row-major FP32 GEMM using flattened gpuMem texture storage. The source
+// arrays may have texture widths unrelated to the logical matrix dimensions.
 Texture2D<float> matrix_a : register(t0);
 Texture2D<float> matrix_b : register(t1);
 cbuffer GemmConstants : register(b0)
@@ -74,21 +76,28 @@ cbuffer GemmConstants : register(b0)
     uint M;
     uint N;
     uint K;
-    uint Padding;
+    uint AWidth;
+    uint BWidth;
+    uint OutWidth;
+    uint Padding0;
+    uint Padding1;
 };
 struct PSInput { float4 position : SV_Position; };
 float main(PSInput input) : SV_Target
 {
-    const uint column = (uint)input.position.x;
-    const uint row = (uint)input.position.y;
-    if (row >= M || column >= N) return 0.0f;
+    const uint outputIndex = (uint)input.position.y * OutWidth + (uint)input.position.x;
+    if (outputIndex >= M * N) return 0.0f;
+    const uint row = outputIndex / N;
+    const uint column = outputIndex - row * N;
     float accumulator = 0.0f;
     [loop]
     for (uint inner = 0; inner < K; ++inner)
     {
-        const float a = matrix_a.Load(int3((int)inner, (int)row, 0));
-        const float b = matrix_b.Load(int3((int)column, (int)inner, 0));
-        accumulator += a * b;
+        const uint aIndex = row * K + inner;
+        const uint bIndex = inner * N + column;
+        const float av = matrix_a.Load(int3((int)(aIndex % AWidth), (int)(aIndex / AWidth), 0));
+        const float bv = matrix_b.Load(int3((int)(bIndex % BWidth), (int)(bIndex / BWidth), 0));
+        accumulator += av * bv;
     }
     return accumulator;
 }

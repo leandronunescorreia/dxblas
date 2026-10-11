@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <initializer_list>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -226,6 +227,20 @@ public:
         if (element_count == 0) return S_OK;
         if (!source.resident()) return E_INVALIDARG;
         return backend_->readback_gpu_mem(source, destination, element_count);
+    }
+
+    // Batch readback queues every GPU-to-staging copy before mapping any staging
+    // resource, reducing synchronization stalls when several buffers are downloaded.
+    HRESULT copy_to_cpu_batch(std::initializer_list<GpuMemReadbackRequest> requests)
+    {
+        if (!backend_) return E_POINTER;
+        for (const auto& request : requests) {
+            if (!request.source || request.count > request.source->count ||
+                (request.count != 0 && !request.destination)) return E_INVALIDARG;
+            if (request.count != 0 && !request.source->texture.Get()) return E_INVALIDARG;
+        }
+        if (requests.size() == 0) return S_OK;
+        return backend_->readback_gpu_mem_batch(std::vector<GpuMemReadbackRequest>(requests));
     }
 
     IBackend* backend() noexcept;
