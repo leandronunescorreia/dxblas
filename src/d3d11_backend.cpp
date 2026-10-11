@@ -434,6 +434,32 @@ public:
         return remaining == 0 ? S_OK : E_FAIL;
     }
 
+    HRESULT sum_texture_gpu(const std::shared_ptr<void>& a_opaque,
+                         const std::shared_ptr<void>& b_opaque,
+                         std::size_t count,
+                         std::shared_ptr<void>& out)
+    {
+        if (!a_opaque || !b_opaque || count == 0) return E_INVALIDARG;
+        auto a = std::static_pointer_cast<GpuTexture>(a_opaque);
+        auto b = std::static_pointer_cast<GpuTexture>(b_opaque);
+        if (a->count != count || b->count != count ||
+            a->width != b->width || a->height != b->height) return E_INVALIDARG;
+        D3D11_TEXTURE2D_DESC a_desc{};
+        D3D11_TEXTURE2D_DESC b_desc{};
+        a->texture->GetDesc(&a_desc);
+        b->texture->GetDesc(&b_desc);
+        if (a_desc.Format != DXGI_FORMAT_R32_FLOAT || b_desc.Format != DXGI_FORMAT_R32_FLOAT)
+            return E_NOTIMPL;
+
+        std::shared_ptr<GpuTexture> output;
+        HRESULT hr = create_copy_texture(DXGI_FORMAT_R32_FLOAT, nullptr, count, output);
+        if (FAILED(hr)) return hr;
+        hr = render_gpu(BinaryOp::Add, a, b, output);
+        if (FAILED(hr)) return hr;
+        out = std::move(output);
+        return S_OK;
+    }
+
     HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out)
     {
         if (format != DXGI_FORMAT_R32_FLOAT || !data || count == 0) return E_INVALIDARG;
@@ -630,6 +656,12 @@ HRESULT D3D11Backend::gemm(const float* a, const float* b, float* c,
 HRESULT D3D11Backend::readback_copy_gpu(const std::shared_ptr<void>& array, void* out, std::size_t count)
 {
     return impl_->readback_copy_gpu(array, out, count);
+}
+
+HRESULT D3D11Backend::sum_texture_gpu(const std::shared_ptr<void>& a, const std::shared_ptr<void>& b,
+                                   std::size_t count, std::shared_ptr<void>& out)
+{
+    return impl_->sum_texture_gpu(a, b, count, out);
 }
 
 HRESULT D3D11Backend::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out)

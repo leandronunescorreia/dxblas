@@ -178,6 +178,28 @@ public:
         return S_OK;
     }
 
+    // Execute an elementwise GPU sum using gpuMem texture handles. The first
+    // implementation intentionally supports FP32, using a D3D11 pixel shader.
+    template<class T>
+    HRESULT sum(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t count)
+    {
+        if (!backend_) return E_POINTER;
+        if (count > a.size() || count > b.size() || count > out.size()) return E_INVALIDARG;
+        if (count == 0) return S_OK;
+        if constexpr (!std::is_same_v<T, float>) {
+            return E_NOTIMPL;
+        } else {
+            if (!a.texture_address_ || !b.texture_address_) return E_INVALIDARG;
+            std::shared_ptr<void> gpu_out;
+            HRESULT hr = backend_->sum_texture_gpu(a.texture_address_, b.texture_address_, count, gpu_out);
+            if (FAILED(hr)) return hr;
+            out.texture_address_ = std::move(gpu_out);
+            out.host_data_.clear(); out.host_data_.shrink_to_fit();
+            out.count_ = count;
+            return S_OK;
+        }
+    }
+
     // Read a typed gpuMem allocation back into caller-owned CPU memory. The
     // backend performs the D3D11 staging copy and row-pitch-aware transfer.
     template<class T>
