@@ -12,6 +12,7 @@
 namespace dxblas::detail {
 
 UINT bytes_per_element(DXGI_FORMAT format);
+DXGI_FORMAT staging_format_for(DXGI_FORMAT format);
 
 struct Layout1D {
     UINT width;
@@ -112,7 +113,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_a_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_b_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> output_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> readback_;
 
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_a_srv_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> input_b_srv_;

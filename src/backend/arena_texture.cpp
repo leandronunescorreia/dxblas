@@ -137,6 +137,16 @@ UINT bytes_per_element(DXGI_FORMAT format)
     }
 }
 
+DXGI_FORMAT staging_format_for(DXGI_FORMAT format)
+{
+    switch (bytes_per_element(format)) {
+    case 1: return DXGI_FORMAT_R8_TYPELESS;
+    case 2: return DXGI_FORMAT_R16_TYPELESS;
+    case 4: return DXGI_FORMAT_R32_TYPELESS;
+    default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 HRESULT layout_1d(std::size_t count, Layout1D& out)
 {
     return layout_1d_with_max_width(
@@ -255,7 +265,6 @@ HRESULT ArenaTexture::allocate(
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_a;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_b;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> output;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> readback;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv_a;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv_b;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
@@ -275,11 +284,6 @@ HRESULT ArenaTexture::allocate(
         D3D11_BIND_RENDER_TARGET, D3D11_USAGE_DEFAULT, 0, output);
     if (FAILED(hr)) return hr;
 
-    hr = create_texture(
-        device_.Get(), width, height, output_format,
-        0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, readback);
-    if (FAILED(hr)) return hr;
-
     hr = create_srv(device_.Get(), input_a.Get(), input_format, srv_a);
     if (FAILED(hr)) return hr;
 
@@ -292,7 +296,6 @@ HRESULT ArenaTexture::allocate(
     input_a_ = std::move(input_a);
     input_b_ = std::move(input_b);
     output_ = std::move(output);
-    readback_ = std::move(readback);
     input_a_srv_ = std::move(srv_a);
     input_b_srv_ = std::move(srv_b);
     output_rtv_ = std::move(rtv);
@@ -333,20 +336,23 @@ HRESULT ArenaTexture::readback(
     UINT bytes_per_element,
     bool packed_integer)
 {
-    if (!context || !destination || !readback_ || !output_ ||
+    if (!context || !destination || !output_ ||
         width == 0 || height == 0 || elements == 0 ||
-        width > capacity_width_ || height > capacity_height_)
+        width > capacity_width_ || height > capacity_height_ ||
+        elements > static_cast<std::size_t>(width) * height)
         return E_INVALIDARG;
 
-    // Copy only the rendered rectangle. The staging texture may be much larger
-    // than this operation (for example, a 4096x4096 arena for a tiny sum).
+    HRESULT hr = ensure_readback_staging(output_format_, width, height);
+    if (FAILED(hr)) return hr;
+
+    // Copy only the rendered rectangle into the shared staging resource.
     const D3D11_BOX used_region{0, 0, 0, width, height, 1};
     context->CopySubresourceRegion(
-        readback_.Get(), 0, 0, 0, 0, output_.Get(), 0, &used_region);
+        shared_staging_.Get(), 0, 0, 0, 0, output_.Get(), 0, &used_region);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    HRESULT hr = context->Map(
-        readback_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->Map(
+        shared_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr))
         return hr;
 
@@ -360,7 +366,7 @@ HRESULT ArenaTexture::readback(
         static_cast<std::size_t>(width) * bytes_per_element;
     if (!packed_integer && mapped.RowPitch == tight_row_bytes) {
         std::memcpy(dst, src, static_cast<std::size_t>(elements) * bytes_per_element);
-        context->Unmap(readback_.Get(), 0);
+        context->Unmap(shared_staging_.Get(), 0);
         return S_OK;
     }
 
@@ -396,7 +402,7 @@ HRESULT ArenaTexture::readback(
         }
     }
 
-    context->Unmap(readback_.Get(), 0);
+    context->Unmap(shared_staging_.Get(), 0);
     return S_OK;
 }
 
@@ -612,29 +618,33 @@ HRESULT ArenaTexture::upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& m
 
 HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UINT height)
 {
-    if (!device_ || format == DXGI_FORMAT_UNKNOWN || width == 0 || height == 0)
+    if (!device_ || width == 0 || height == 0)
         return E_INVALIDARG;
 
-    const bool reusable = shared_staging_ && shared_staging_format_ == format &&
+    const DXGI_FORMAT staging_format = staging_format_for(format);
+    if (staging_format == DXGI_FORMAT_UNKNOWN)
+        return E_INVALIDARG;
+
+    const bool reusable = shared_staging_ && shared_staging_format_ == staging_format &&
         shared_staging_width_ >= width && shared_staging_height_ >= height;
     if (reusable) return S_OK;
 
-    // Grow monotonically for a given format. A format change requires a new
-    // staging texture, but retains the largest dimensions already requested.
+    // Keep the largest dimensions requested for this element-size class.
+    // Typed formats with the same element size share a typeless staging resource.
     UINT allocation_width = width;
     UINT allocation_height = height;
-    if (shared_staging_format_ == format) {
+    if (shared_staging_format_ == staging_format) {
         allocation_width = std::max(allocation_width, shared_staging_width_);
         allocation_height = std::max(allocation_height, shared_staging_height_);
     }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-    HRESULT hr = create_texture(device_.Get(), allocation_width, allocation_height, format,
-        0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
+    HRESULT hr = create_texture(device_.Get(), allocation_width, allocation_height,
+        staging_format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);
     if (FAILED(hr)) return hr;
 
     shared_staging_ = std::move(staging);
-    shared_staging_format_ = format;
+    shared_staging_format_ = staging_format;
     shared_staging_width_ = allocation_width;
     shared_staging_height_ = allocation_height;
     return S_OK;
