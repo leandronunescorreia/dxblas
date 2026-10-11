@@ -29,10 +29,7 @@ public:
     ArenaTexture(const ArenaTexture&) = delete;
     ArenaTexture& operator=(const ArenaTexture&) = delete;
 
-    HRESULT initialize(
-        ID3D11Device* device,
-        UINT initial_width = 2048,
-        UINT initial_height = 1);
+    HRESULT initialize(ID3D11Device* device);
     HRESULT initialize_adaptive(ID3D11Device* device);
 
     HRESULT ensure(
