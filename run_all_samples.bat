@@ -43,6 +43,7 @@ for %%S in (
     dxblas_big_array.exe
     dxblas_first_step.exe
     dxblas_copy_timing.exe
+    dxblas_upload_bench.exe
 ) do call :RUN_SAMPLE "%%S"
 
 echo.

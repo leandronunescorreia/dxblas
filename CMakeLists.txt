@@ -123,6 +123,11 @@ if(dxBLAS_BUILD_EXAMPLE)
     target_compile_definitions(dxblas_copy_timing
         PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+    add_executable(dxblas_upload_bench examples/upload_bench.cpp)
+    target_link_libraries(dxblas_upload_bench PRIVATE dxblas)
+    target_compile_definitions(dxblas_upload_bench
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
     add_executable(dxblas_gemm examples/dxblas_gemm.cpp)
     target_link_libraries(dxblas_gemm PRIVATE dxblas)
     target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

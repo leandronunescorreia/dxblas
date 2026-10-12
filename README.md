@@ -216,3 +216,43 @@ The sample defaults to a 4096 x 4096 square multiplication. An optional argument
 ### GEMM shader loading
 
 `dxblas_gemm` can run regardless of its process working directory: the GEMM HLSL has an embedded fallback. CMake also copies editable shaders beside the `dxblas_gemm` executable for development. If a shader is edited on disk, ensure the executable's working directory allows the runtime loader to find the corresponding `shaders/gemm.hlsl`; otherwise the embedded built-in shader is used.
+
+
+## Upload strategy benchmark (T11)
+
+`dxblas_upload_bench` compares the current `UpdateSubresource` path (A) with a
+persistent CPU-write staging texture followed by `CopySubresourceRegion` (B).
+Both strategies upload `DXGI_FORMAT_R32_FLOAT` textures with 16,384 elements per
+row. Every iteration is followed by a D3D11 event-query wait so the reported
+median latency includes GPU completion, rather than measuring command submission
+alone. The staging texture is reused across warm-up and measured iterations for
+each size. The benchmark runs 20 warm-up iterations and records the median of 100
+measured iterations for 64 KiB, 1 MiB, 16 MiB, and 256 MiB.
+
+Build and run on Windows:
+
+```bat
+cmake --build build --config Release --target dxblas_upload_bench
+build\Release\dxblas_upload_bench.exe --list-adapters
+build\Release\dxblas_upload_bench.exe
+```
+
+The default run uses DXBLAS's normal best-hardware-adapter selection. To measure
+another hardware adapter, pass its DXGI enumeration index (for example, index 0):
+
+```bat
+build\Release\dxblas_upload_bench.exe --adapter-index 0
+```
+
+Record one table per GPU below. **No results have been recorded yet**; this source
+archive was not run on a Windows GPU during implementation. Do not switch the
+library's upload strategy until measurements on the primary GPU satisfy the
+project's decision rule: B must be at least 20% faster at both 16 MiB and 256 MiB,
+and no more than 10% slower at 64 KiB.
+
+| GPU / adapter | Size | A: UpdateSubresource median ms | A GB/s | B: staging median ms | B GB/s | A/B speed ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| Pending Windows run | 64 KiB | — | — | — | — | — |
+| Pending Windows run | 1 MiB | — | — | — | — | — |
+| Pending Windows run | 16 MiB | — | — | — | — | — |
+| Pending Windows run | 256 MiB | — | — | — | — | — |
