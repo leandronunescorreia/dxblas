@@ -51,9 +51,6 @@ public:
     HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m, std::size_t n, std::size_t k) override;
 
     HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, std::shared_ptr<void>& out) override;
-    HRESULT copy_gpu(DXGI_FORMAT format, const void* a, const void* b, std::size_t count, std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b, std::shared_ptr<void>& gpu_out) override;
-    HRESULT readback_copy_gpu(const std::shared_ptr<void>& array, void* out, std::size_t count) override;
-    HRESULT sum_texture_gpu(const std::shared_ptr<void>& a, const std::shared_ptr<void>& b, std::size_t count, std::shared_ptr<void>& out) override;
     HRESULT sum_gpu(const std::shared_ptr<void>& a, const std::shared_ptr<void>& b, std::size_t count, std::shared_ptr<void>& out) override;
     HRESULT mul_gpu(const std::shared_ptr<void>& a, const std::shared_ptr<void>& b, std::size_t count, std::shared_ptr<void>& out) override;
     HRESULT readback_gpu(const std::shared_ptr<void>& array, void* out, std::size_t count) override;

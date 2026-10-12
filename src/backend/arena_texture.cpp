@@ -1,6 +1,7 @@
 #include "arena_texture.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -327,8 +328,7 @@ HRESULT ArenaTexture::readback(
     UINT width,
     UINT height,
     UINT elements,
-    UINT bytes_per_element,
-    bool packed_integer)
+    UINT bytes_per_element)
 {
     if (!context || !destination || !output_ ||
         width == 0 || height == 0 || elements == 0 ||
@@ -350,36 +350,8 @@ HRESULT ArenaTexture::readback(
     if (FAILED(hr))
         return hr;
 
-    HRESULT copy_hr = S_OK;
-    if (!packed_integer) {
-        copy_hr = copy_mapped_to_cpu(
-            mapped, destination, elements, width, height, bytes_per_element);
-    } else {
-        const UINT last_row_elements = elements - (height - 1u) * width;
-        auto* dst = static_cast<std::uint8_t*>(destination);
-        const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-
-        // Packed integer render targets require channel reconstruction rather
-        // than a byte-for-byte row copy, so retain their format-specific path.
-        for (UINT y = 0; y < height; ++y) {
-            const UINT row_count = (y + 1u == height) ? last_row_elements : width;
-            auto* row_dst = dst + static_cast<std::size_t>(y) * width * bytes_per_element;
-            const auto* row_src = src + static_cast<std::size_t>(y) * mapped.RowPitch;
-            for (UINT x = 0; x < row_count; ++x) {
-                const auto* pixel = row_src + static_cast<std::size_t>(x) * 4u;
-                const std::uint32_t value =
-                    static_cast<std::uint32_t>(pixel[0]) |
-                    (static_cast<std::uint32_t>(pixel[1]) << 8) |
-                    (static_cast<std::uint32_t>(pixel[2]) << 16) |
-                    (static_cast<std::uint32_t>(pixel[3]) << 24);
-                std::memcpy(
-                    row_dst + static_cast<std::size_t>(x) * bytes_per_element,
-                    &value, bytes_per_element);
-            }
-        }
-    }
-
-    // Every successful Map is paired with Unmap before propagating the copy result.
+    const HRESULT copy_hr = copy_mapped_to_cpu(
+        mapped, destination, elements, width, height, bytes_per_element);
     context->Unmap(shared_staging_.Get(), 0);
     return copy_hr;
 }
@@ -470,8 +442,8 @@ HRESULT ArenaTexture::readback_float(
 
     const UINT rows = static_cast<UINT>((count + source->width - 1u) / source->width);
     const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, source->width));
-    HRESULT hr = ensure_readback_staging(source->storage_format == DXGI_FORMAT_UNKNOWN
-        ? DXGI_FORMAT_R32_FLOAT : source->storage_format, copied_width, rows);
+    assert(source->storage_format != DXGI_FORMAT_UNKNOWN);
+    HRESULT hr = ensure_readback_staging(source->storage_format, copied_width, rows);
     if (FAILED(hr)) return hr;
 
     const D3D11_BOX used_region{0, 0, 0, copied_width, rows, 1};
@@ -618,6 +590,7 @@ HRESULT ArenaTexture::readback_gpu_mem(ID3D11DeviceContext* context, gpuMemBase&
     if (!context || !memory.texture.Get() || !out || count == 0 ||
         count > memory.count || memory.width == 0 || memory.height == 0)
         return E_INVALIDARG;
+    assert(memory.storage_format != DXGI_FORMAT_UNKNOWN);
 
     const UINT rows = static_cast<UINT>((count + memory.width - 1u) / memory.width);
     const UINT copied_width = static_cast<UINT>(std::min<std::size_t>(count, memory.width));
@@ -811,20 +784,6 @@ HRESULT ArenaTexture::create_gpu_buffer(
     return S_OK;
 }
 
-HRESULT ArenaTexture::copy_gpu_buffers(
-    ID3D11DeviceContext* context, DXGI_FORMAT format, const void* a, const void* b,
-    std::size_t count, std::shared_ptr<void>& gpu_a, std::shared_ptr<void>& gpu_b,
-    std::shared_ptr<void>& gpu_out)
-{
-    if (!a || !b || count == 0) return E_INVALIDARG;
-    std::shared_ptr<gpuMemBase> ta, tb, to;
-    HRESULT hr = create_gpu_buffer(context, format, a, count, ta); if (FAILED(hr)) return hr;
-    hr = create_gpu_buffer(context, format, b, count, tb); if (FAILED(hr)) return hr;
-    hr = create_gpu_buffer(context, format, nullptr, count, to); if (FAILED(hr)) return hr;
-    gpu_a = std::move(ta); gpu_b = std::move(tb); gpu_out = std::move(to);
-    return S_OK;
-}
-
 HRESULT ArenaTexture::readback_gpu_buffer(
     ID3D11DeviceContext* context, const std::shared_ptr<void>& opaque,
     void* out, std::size_t count)
@@ -835,7 +794,8 @@ HRESULT ArenaTexture::readback_gpu_buffer(
     return readback_gpu_mem(context, *texture, out, count);
 }
 
-std::shared_ptr<gpuMemBase> ArenaTexture::texture_from_handle(const std::shared_ptr<void>& handle) const noexcept
+std::shared_ptr<gpuMemBase> ArenaTexture::texture_from_handle(
+    const std::shared_ptr<void>& handle) const noexcept
 {
     if (!handle) return {};
     return std::static_pointer_cast<gpuMemBase>(handle);

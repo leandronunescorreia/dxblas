@@ -52,8 +52,7 @@ public:
         UINT width,
         UINT height,
         UINT elements,
-        UINT bytes_per_element,
-        bool packed_integer);
+        UINT bytes_per_element);
 
     ID3D11ShaderResourceView* input_a_srv() const noexcept { return input_a_srv_.Get(); }
     ID3D11ShaderResourceView* input_b_srv() const noexcept { return input_b_srv_.Get(); }
@@ -75,15 +74,10 @@ public:
     HRESULT create_gpu_buffer(
         ID3D11DeviceContext* context, DXGI_FORMAT format, const void* data,
         std::size_t count, std::shared_ptr<gpuMemBase>& out);
-    HRESULT copy_gpu_buffers(
-        ID3D11DeviceContext* context, DXGI_FORMAT format, const void* a,
-        const void* b, std::size_t count, std::shared_ptr<void>& gpu_a,
-        std::shared_ptr<void>& gpu_b, std::shared_ptr<void>& gpu_out);
     HRESULT readback_gpu_buffer(
         ID3D11DeviceContext* context, const std::shared_ptr<void>& array,
         void* out, std::size_t count);
-    // Returns the texture resource associated with a gpuMem handle. The arena owns
-    // allocation, views, upload and readback; the backend owns all draw/render state.
+    // Used by the active GpuArray arithmetic path to recover its arena resource.
     std::shared_ptr<gpuMemBase> texture_from_handle(const std::shared_ptr<void>& handle) const noexcept;
 
     UINT capacity_width() const noexcept { return capacity_width_; }
