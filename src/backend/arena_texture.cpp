@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace dxblas::detail {
@@ -188,6 +189,84 @@ HRESULT layout_1d(std::size_t count, Layout1D& out)
 {
     return layout_1d_with_max_width(
         count, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION), out);
+}
+
+HRESULT GpuTimer::initialize(ID3D11Device* device, ID3D11DeviceContext* context)
+{
+    if (!device || !context) return E_INVALIDARG;
+
+    D3D11_QUERY_DESC desc{};
+    desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    Microsoft::WRL::ComPtr<ID3D11Query> disjoint;
+    HRESULT hr = device->CreateQuery(&desc, &disjoint);
+    if (FAILED(hr)) return hr;
+
+    desc.Query = D3D11_QUERY_TIMESTAMP;
+    Microsoft::WRL::ComPtr<ID3D11Query> start;
+    hr = device->CreateQuery(&desc, &start);
+    if (FAILED(hr)) return hr;
+    Microsoft::WRL::ComPtr<ID3D11Query> end;
+    hr = device->CreateQuery(&desc, &end);
+    if (FAILED(hr)) return hr;
+
+    context_ = context;
+    disjoint_query_ = std::move(disjoint);
+    start_query_ = std::move(start);
+    end_query_ = std::move(end);
+    active_ = false;
+    pending_ = false;
+    return S_OK;
+}
+
+HRESULT GpuTimer::begin()
+{
+    if (!context_ || !disjoint_query_ || !start_query_ || !end_query_)
+        return E_UNEXPECTED;
+    if (active_ || pending_) return E_UNEXPECTED;
+
+    context_->Begin(disjoint_query_.Get());
+    context_->End(start_query_.Get());
+    active_ = true;
+    return S_OK;
+}
+
+HRESULT GpuTimer::end()
+{
+    if (!context_ || !active_) return E_UNEXPECTED;
+
+    context_->End(end_query_.Get());
+    context_->End(disjoint_query_.Get());
+    active_ = false;
+    pending_ = true;
+    return S_OK;
+}
+
+double GpuTimer::elapsed_ms()
+{
+    if (!context_ || !pending_) return std::numeric_limits<double>::quiet_NaN();
+
+    const auto wait_for_query = [this](ID3D11Query* query, void* data, UINT size) -> HRESULT {
+        HRESULT hr = S_FALSE;
+        while (hr == S_FALSE) {
+            hr = context_->GetData(query, data, size, 0);
+            if (hr == S_FALSE) std::this_thread::yield();
+        }
+        return hr;
+    };
+
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+    UINT64 start = 0;
+    UINT64 end = 0;
+    HRESULT hr = wait_for_query(disjoint_query_.Get(), &disjoint, sizeof(disjoint));
+    if (SUCCEEDED(hr)) hr = wait_for_query(start_query_.Get(), &start, sizeof(start));
+    if (SUCCEEDED(hr)) hr = wait_for_query(end_query_.Get(), &end, sizeof(end));
+
+    pending_ = false;
+    if (FAILED(hr) || disjoint.Disjoint || disjoint.Frequency == 0 || end < start)
+        return std::numeric_limits<double>::quiet_NaN();
+
+    return static_cast<double>(end - start) * 1000.0 /
+        static_cast<double>(disjoint.Frequency);
 }
 
 HRESULT ArenaTexture::initialize(ID3D11Device* device)

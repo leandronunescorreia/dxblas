@@ -117,6 +117,12 @@ if(dxBLAS_BUILD_EXAMPLE)
     target_compile_definitions(dxblas_copy_tests
         PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+    add_executable(dxblas_copy_timing examples/copy_timing.cpp)
+    target_link_libraries(dxblas_copy_timing PRIVATE dxblas)
+    target_include_directories(dxblas_copy_timing PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(dxblas_copy_timing
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
     add_executable(dxblas_gemm examples/dxblas_gemm.cpp)
     target_link_libraries(dxblas_gemm PRIVATE dxblas)
     target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

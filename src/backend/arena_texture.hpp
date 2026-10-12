@@ -21,6 +21,28 @@ struct Layout1D {
 
 HRESULT layout_1d(std::size_t count, Layout1D& out);
 
+// Internal D3D11 timestamp timer used by copy_timing. The timer owns its
+// queries and retains the device/context supplied at initialization.
+class GpuTimer final {
+public:
+    GpuTimer() = default;
+    GpuTimer(const GpuTimer&) = delete;
+    GpuTimer& operator=(const GpuTimer&) = delete;
+
+    HRESULT initialize(ID3D11Device* device, ID3D11DeviceContext* context);
+    HRESULT begin();
+    HRESULT end();
+    double elapsed_ms();
+
+private:
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+    Microsoft::WRL::ComPtr<ID3D11Query> disjoint_query_;
+    Microsoft::WRL::ComPtr<ID3D11Query> start_query_;
+    Microsoft::WRL::ComPtr<ID3D11Query> end_query_;
+    bool active_ = false;
+    bool pending_ = false;
+};
+
 class ArenaTexture final {
 public:
     ArenaTexture() = default;
