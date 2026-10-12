@@ -138,6 +138,10 @@ cmake --build build
 .\build\dxblas_big_array.exe
 ```
 
+## Memory ownership (`gpuMem<T>`)
+
+`gpuMem<T>` is a non-owning upload descriptor: the pointer passed to its constructor or `assign(ptr, n)` must remain valid until `Context::copy` returns. A successful `Context::copy` clears the pending host pointer, so the descriptor does not retain or copy the CPU payload. To upload new data, call `assign(ptr, n)` and then `copy` again. The existing GPU texture is reused when its shape and storage format still match. `gpuMem<T>` is move-only because copying it would create multiple objects that appear to own the same GPU resources; moving transfers the texture/SRV/RTV and leaves the source empty. Do not pass a temporary vector or otherwise let the pointed-to storage expire before `Context::copy` returns.
+
 ## D3D11 pixel pipeline texture arena
 
 The D3D11 backend uses a persistent `ArenaTexture` owned by the backend context.

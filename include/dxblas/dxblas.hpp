@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <d3d11.h>
@@ -39,10 +40,6 @@ struct float16 {
     explicit constexpr float16(std::uint16_t raw_bits) noexcept : bits(raw_bits) {}
 };
 
-// Typed host staging object for data that will be mapped into the GPU texture
-// arena by subsequent operations. This first API step owns the CPU payload and
-// records its intended DXGI element format; it does not allocate a separate
-// texture per object.
 template<class T> struct gpu_mem_traits;
 template<> struct gpu_mem_traits<std::uint8_t> { static constexpr DXGI_FORMAT format = DXGI_FORMAT_R8_UINT; };
 template<> struct gpu_mem_traits<std::int16_t> { static constexpr DXGI_FORMAT format = DXGI_FORMAT_R16_SINT; };
@@ -50,6 +47,10 @@ template<> struct gpu_mem_traits<std::int32_t> { static constexpr DXGI_FORMAT fo
 template<> struct gpu_mem_traits<float16> { static constexpr DXGI_FORMAT format = DXGI_FORMAT_R16_FLOAT; };
 template<> struct gpu_mem_traits<float> { static constexpr DXGI_FORMAT format = DXGI_FORMAT_R32_FLOAT; };
 
+// Non-owning upload descriptor for data that will be copied into the GPU texture
+// arena. The caller's pointer must remain valid until Context::copy returns. A
+// successful copy clears the pending pointer; to upload again, call assign(ptr, n)
+// and then copy. The GPU texture is reused when shape and format still match.
 template<class T>
 class gpuMem : public gpuMemBase {
     static_assert(
@@ -78,6 +79,17 @@ public:
     }
     gpuMem(std::vector<T>&&) = delete;
 
+    gpuMem(const gpuMem&) = delete;
+    gpuMem& operator=(const gpuMem&) = delete;
+
+    gpuMem(gpuMem&& other) noexcept { move_from(std::move(other)); }
+
+    gpuMem& operator=(gpuMem&& other) noexcept
+    {
+        if (this != &other) move_from(std::move(other));
+        return *this;
+    }
+
     // Retain only the caller's pointer; no CPU payload allocation or memcpy occurs here.
     // The caller must keep [data, data + element_count) valid until the next upload operation.
     void assign(const T* data, std::size_t element_count) {
@@ -89,6 +101,8 @@ public:
     }
 
     void assign(const std::vector<T>& data) { assign(data.data(), data.size()); }
+    void assign(std::vector<T>&&) = delete;
+
     std::size_t size() const noexcept { return count; }
     bool empty() const noexcept { return count == 0; }
     DXGI_FORMAT format() const noexcept { return gpu_mem_traits<T>::format; }
@@ -98,6 +112,24 @@ public:
 
 private:
     friend class Context;
+
+    void move_from(gpuMem&& other) noexcept
+    {
+        texture = std::move(other.texture);
+        srv = std::move(other.srv);
+        rtv = std::move(other.rtv);
+        width = other.width;
+        height = other.height;
+        count = other.count;
+        storage_format = other.storage_format;
+        pending_data_ = std::exchange(other.pending_data_, nullptr);
+
+        other.width = 0;
+        other.height = 0;
+        other.count = 0;
+        other.storage_format = DXGI_FORMAT_UNKNOWN;
+    }
+
     void release_pending_data() noexcept { pending_data_ = nullptr; }
     const T* pending_data_ = nullptr;
 };

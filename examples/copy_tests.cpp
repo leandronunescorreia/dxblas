@@ -6,7 +6,17 @@
 #include <iostream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
+
+static_assert(!std::is_copy_constructible_v<dxblas::gpuMem<float>>,
+              "gpuMem must not be copy-constructible");
+static_assert(!std::is_copy_assignable_v<dxblas::gpuMem<float>>,
+              "gpuMem must not be copy-assignable");
+static_assert(std::is_move_constructible_v<dxblas::gpuMem<float>>,
+              "gpuMem must remain move-constructible");
+static_assert(std::is_move_assignable_v<dxblas::gpuMem<float>>,
+              "gpuMem must remain move-assignable");
 
 namespace {
 
@@ -113,8 +123,12 @@ void run_reupload_case(dxblas::Context& context, const char* type_name, int& fai
 
     dxblas::gpuMem<T> a(count), b(count), out(count);
     bool passed = upload_pair(context, a, b, out, first_a, first_b);
-    if (passed)
+    ID3D11Texture2D* const first_texture = passed ? a.texture.Get() : nullptr;
+    bool texture_reused = false;
+    if (passed) {
         passed = upload_pair(context, a, b, out, second_a, second_b);
+        texture_reused = passed && a.texture.Get() == first_texture;
+    }
     if (passed) {
         const HRESULT hr = context.copy_to_cpu_batch({
             {&a, actual_a.data(), count},
@@ -127,6 +141,40 @@ void run_reupload_case(dxblas::Context& context, const char* type_name, int& fai
                       << static_cast<unsigned long>(hr) << std::dec << '\n';
     }
     report(std::string(type_name) + " reupload uses second data set", passed, failures);
+    report(std::string(type_name) + " same-size reupload reuses texture", texture_reused, failures);
+}
+
+void run_move_semantics_case(dxblas::Context& context, int& failures)
+{
+    constexpr std::size_t count = 4097;
+    std::vector<float> values_a(count), values_b(count);
+    fill_pattern(values_a, 17);
+    fill_pattern(values_b, 29);
+
+    dxblas::gpuMem<float> a(count), b(count), out(count);
+    bool passed = upload_pair(context, a, b, out, values_a, values_b);
+    if (passed) {
+        ID3D11Texture2D* const a_texture = a.texture.Get();
+        ID3D11ShaderResourceView* const a_srv = a.srv.Get();
+        ID3D11RenderTargetView* const a_rtv = a.rtv.Get();
+        dxblas::gpuMem<float> moved_a(std::move(a));
+        passed = moved_a.texture.Get() == a_texture && moved_a.srv.Get() == a_srv &&
+                 moved_a.rtv.Get() == a_rtv && !a.texture && !a.srv && !a.rtv &&
+                 a.width == 0 && a.height == 0 && a.count == 0 &&
+                 a.storage_format == DXGI_FORMAT_UNKNOWN && a.data() == nullptr;
+
+        ID3D11Texture2D* const out_texture = out.texture.Get();
+        ID3D11ShaderResourceView* const out_srv = out.srv.Get();
+        ID3D11RenderTargetView* const out_rtv = out.rtv.Get();
+        dxblas::gpuMem<float> moved_out(1);
+        moved_out = std::move(out);
+        passed = passed && moved_out.texture.Get() == out_texture &&
+                 moved_out.srv.Get() == out_srv && moved_out.rtv.Get() == out_rtv &&
+                 !out.texture && !out.srv && !out.rtv && out.width == 0 &&
+                 out.height == 0 && out.count == 0 &&
+                 out.storage_format == DXGI_FORMAT_UNKNOWN && out.data() == nullptr;
+    }
+    report("gpuMem move transfers resources and empties source", passed, failures);
 }
 
 template<class T>
@@ -265,6 +313,7 @@ int main()
     run_type_sizes<std::int16_t>(context, "int16", failures);
 
     run_reupload_case<float>(context, "float", failures);
+    run_move_semantics_case(context, failures);
     run_shrink_case<float>(context, "float", failures);
     run_prefix_case<float>(context, "float", failures);
     run_batch_size_case(context, 2, failures);
