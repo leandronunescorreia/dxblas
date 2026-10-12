@@ -142,21 +142,29 @@ cmake --build build
 
 `gpuMem<T>` is a non-owning upload descriptor: the pointer passed to its constructor or `assign(ptr, n)` must remain valid until `Context::copy` returns. A successful `Context::copy` clears the pending host pointer, so the descriptor does not retain or copy the CPU payload. To upload new data, call `assign(ptr, n)` and then `copy` again. The existing GPU texture is reused when its shape and storage format still match. `gpuMem<T>` is move-only because copying it would create multiple objects that appear to own the same GPU resources; moving transfers the texture/SRV/RTV and leaves the source empty. Do not pass a temporary vector or otherwise let the pointed-to storage expire before `Context::copy` returns.
 
-## D3D11 pixel pipeline texture arena
+## D3D11 pixel pipeline texture arena and readback
 
-The D3D11 backend uses a persistent `ArenaTexture` owned by the backend context.
-The arena keeps reusable input SRVs, an output RTV texture, and a CPU-readable
-staging texture alive across operations. It grows when a requested operation
-does not fit and only reallocates when the format or capacity must change.
+The backend owns a lazy `ArenaTexture`: it does not reserve a maximum-sized
+4096×4096 arena at initialization. Textures are allocated on first use and
+recreated only when the requested dimensions or format require more capacity.
+The arena keeps reusable input SRVs and an output RTV texture for the classic
+vertex/pixel-shader/render-to-texture pipeline.
 
-Each operation therefore follows the hot path:
+Uploads continue to use `UpdateSubresource`, including a full-rows box and a
+tail box when the input does not fill the final row. T11 measured an alternative
+persistent CPU-write staging upload, but the measured 16 MiB result did not meet
+the project's 20% improvement threshold, so the production upload path was not
+changed.
 
-1. `UpdateSubresource` the two input arrays into the persistent arena textures.
-2. Draw the fullscreen triangle and execute the pixel shader.
-3. `CopyResource` the persistent output texture into its staging texture.
-4. Map/read the staging texture back into the caller's C++ output buffer.
+Readback staging is shared and cached by element-size-compatible format rather
+than recreated for each request. The staging capacity grows as needed. The
+single-readback path uses a contiguous `memcpy` when the mapped pitch is tight;
+otherwise it copies row by row. `copy_to_cpu_batch` queues all requested regions
+into one shared staging texture and maps it once for the batch. Successful
+`Map` calls are paired with `Unmap` before returning. GPU memory resources retain
+their `storage_format` so readback does not need to guess a fallback format.
 
-No `ID3D11ComputeShader` or `Dispatch` is used.
+No `ID3D11ComputeShader`, UAV, structured buffer, or `Dispatch` is used.
 
 
 
@@ -218,41 +226,85 @@ The sample defaults to a 4096 x 4096 square multiplication. An optional argument
 `dxblas_gemm` can run regardless of its process working directory: the GEMM HLSL has an embedded fallback. CMake also copies editable shaders beside the `dxblas_gemm` executable for development. If a shader is edited on disk, ensure the executable's working directory allows the runtime loader to find the corresponding `shaders/gemm.hlsl`; otherwise the embedded built-in shader is used.
 
 
+## Copy timing benchmark (T10)
+
+`dxblas_copy_timing` measures CPU time spent in `Context::copy`, a GPU timestamp
+region around that call, and CPU wall time for readback. The values below were
+reported by the Release run on the NVIDIA GeForce 840M. Each size used one warm-up
+and five measured iterations; the displayed statistic is the median. Upload
+throughput counts both input buffers, and all throughput figures use decimal GB/s.
+The CPU upload number is submission/call time, while the GPU timestamp is a
+separate GPU timeline measurement; they are not additive measurements of the
+same interval.
+
+| Size | Upload CPU ms | Upload CPU GB/s | Upload GPU ms | Upload GPU GB/s | Readback CPU ms | Readback GB/s |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 KiB | 0.024 | 0.086 | 0.004 | 0.508 | 0.181 | 0.006 |
+| 1 MiB | 0.664 | 3.156 | 1.345 | 1.560 | 1.060 | 0.989 |
+| 16 MiB | 6.475 | 5.182 | 21.394 | 1.568 | 13.898 | 1.207 |
+| 256 MiB | 292.345 | 1.836 | 442.040 | 1.215 | 206.963 | 1.297 |
+
+The large readback times justify investigating overlap in a future change, but
+T10's optional asynchronous readback ticket API was not implemented. The library
+remains synchronous and its behavior was not changed by the timer helper.
+
 ## Upload strategy benchmark (T11)
 
-`dxblas_upload_bench` compares the current `UpdateSubresource` path (A) with a
-persistent CPU-write staging texture followed by `CopySubresourceRegion` (B).
-Both strategies upload `DXGI_FORMAT_R32_FLOAT` textures with 16,384 elements per
-row. Every iteration is followed by a D3D11 event-query wait so the reported
-median latency includes GPU completion, rather than measuring command submission
-alone. The staging texture is reused across warm-up and measured iterations for
-each size. The benchmark runs 20 warm-up iterations and records the median of 100
-measured iterations for 64 KiB, 1 MiB, 16 MiB, and 256 MiB.
+`dxblas_upload_bench` compares Strategy A (`UpdateSubresource`, matching the
+production upload path) with Strategy B (a persistent `D3D11_USAGE_STAGING`
+texture mapped for CPU write, followed by `CopySubresourceRegion`). The results
+below are from the NVIDIA GeForce 840M only. The run used 20 warm-up iterations
+and 100 measured iterations per size, forced GPU completion after each iteration
+with an EVENT query, and reported median latency. Throughput is decimal GB/s.
 
-Build and run on Windows:
+| Size | A median ms | A GB/s | B median ms | B GB/s | A/B speed ratio |
+|---:|---:|---:|---:|---:|---:|
+| 64 KiB | 0.238 | 0.275 | 0.173 | 0.379 | 1.378× |
+| 1 MiB | 0.939 | 1.117 | 0.932 | 1.125 | 1.007× |
+| 16 MiB | 15.584 | 1.077 | 14.428 | 1.163 | 1.080× |
+| 256 MiB | 499.479 | 0.537 | 233.712 | 1.149 | 2.137× |
+
+**Decision:** keep Strategy A in the library. Strategy B is substantially faster
+at 256 MiB and faster at 64 KiB, but only about 7.4% faster at 16 MiB, below the
+required 20% improvement. The integrated Intel adapter has not yet been measured,
+so the all-hardware-adapters portion of T11 remains outstanding.
+
+Build and run the benchmarks on Windows:
 
 ```bat
-cmake --build build --config Release --target dxblas_upload_bench
+cmake --build build --config Release --target dxblas_copy_timing dxblas_upload_bench
+build\Release\dxblas_copy_timing.exe
 build\Release\dxblas_upload_bench.exe --list-adapters
-build\Release\dxblas_upload_bench.exe
-```
-
-The default run uses DXBLAS's normal best-hardware-adapter selection. To measure
-another hardware adapter, pass its DXGI enumeration index (for example, index 0):
-
-```bat
 build\Release\dxblas_upload_bench.exe --adapter-index 0
 ```
 
-Record one table per GPU below. **No results have been recorded yet**; this source
-archive was not run on a Windows GPU during implementation. Do not switch the
-library's upload strategy until measurements on the primary GPU satisfy the
-project's decision rule: B must be at least 20% faster at both 16 MiB and 256 MiB,
-and no more than 10% slower at 64 KiB.
+Use the adapter indices reported by `--list-adapters` to run the upload benchmark
+on each hardware adapter; skip software adapters. Do not infer Intel results from
+the NVIDIA measurements.
 
-| GPU / adapter | Size | A: UpdateSubresource median ms | A GB/s | B: staging median ms | B GB/s | A/B speed ratio |
-|---|---:|---:|---:|---:|---:|---:|
-| Pending Windows run | 64 KiB | — | — | — | — | — |
-| Pending Windows run | 1 MiB | — | — | — | — | — |
-| Pending Windows run | 16 MiB | — | — | — | — | — |
-| Pending Windows run | 256 MiB | — | — | — | — | — |
+## T01–T11 implementation and verification report
+
+The following file lists describe the task patches in this hand-off. They identify
+files changed for each task; where a task reuses earlier changes, the list is the
+set changed by that task's patch, not the full cumulative diff.
+
+| Task | Files changed | Result / deviation |
+|---|---|---|
+| T01 | `src/d3d11_backend.cpp` | Restored best hardware-adapter selection. |
+| T02 | `examples/copy_tests.cpp`, `CMakeLists.txt`, `run_all_samples.bat` | Added copy test harness. |
+| T03 | `src/backend/arena_texture.hpp`, `src/backend/arena_texture.cpp`, `src/d3d11_backend.cpp` | Centralized format-size and 1D-layout helpers. |
+| T04 | `src/backend/arena_texture.hpp`, `src/backend/arena_texture.cpp`, `include/dxblas/gpu_mem.hpp` | Added shared staging keyed by element size. |
+| T05 | `src/backend/arena_texture.cpp` | Added tight-pitch single-`memcpy` readback path. |
+| T06 | `src/backend/arena_texture.hpp`, `src/backend/arena_texture.cpp` | Made arena allocation lazy. |
+| T07 | `src/backend/arena_texture.cpp`, `src/backend/arena_texture.hpp` | Added batched readback using one staging texture and one `Map`. |
+| T08 | `src/backend/arena_texture.cpp`, `src/backend/arena_texture.hpp`, `src/backend/d3d11_backend.hpp`, `src/d3d11_backend.cpp`, `include/dxblas/backend.hpp` | Consolidated arithmetic validation, rejected output/input texture aliasing, enforced format invariants, and removed unused wrappers. `texture_from_handle` was retained because it remains used by the GPU-array path. |
+| T09 | `include/dxblas/dxblas.hpp`, `examples/copy_tests.cpp`, `README.md` | Made `gpuMem<T>` move-only, rejected temporary-vector assignment, tested resource moves and same-size reuploads, and documented pointer lifetime. |
+| T10 | `CMakeLists.txt`, `src/backend/arena_texture.hpp`, `src/backend/arena_texture.cpp`, `examples/copy_timing.cpp` | Added timestamp helper and timing sample. Optional asynchronous readback was deferred; the synchronous API remains unchanged. |
+| T11 | `CMakeLists.txt`, `README.md`, `examples/upload_bench.cpp` | Added A/B upload benchmark. No production upload change because the 16 MiB threshold was not met. Intel measurements remain outstanding. |
+
+### Runtime evidence provided
+
+- T09: Release `run_all_samples.bat` reported 9 passed and 0 failed; the copy tests included second-data reupload, same-size texture reuse, and move-resource checks.
+- T10: Release run reported 10 passed and 0 failed, including `dxblas_copy_timing.exe`; measurements are recorded above.
+- T11: Release run reported 11 passed and 0 failed, including `dxblas_upload_bench.exe`; NVIDIA measurements and the decision are recorded above.
+- Not evidenced in the supplied logs: a complete Debug run, D3D11 debug-layer run with zero new warnings, or Intel upload benchmark results. These checks must not be treated as passed until run on Windows.
