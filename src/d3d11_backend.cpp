@@ -184,32 +184,44 @@ public:
 
     HRESULT binary_gpu_mem(BinaryOp op, gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count)
     {
-        // Keep sum/mul validation identical: validate resources and shape before
-        // preparing the output, and never bind one texture as both SRV and RTV.
+        // Both inputs must use the same pixel row width. Their allocated heights
+        // may differ as long as the requested prefix is present in each texture.
         if (a.storage_format != DXGI_FORMAT_R32_FLOAT ||
             b.storage_format != DXGI_FORMAT_R32_FLOAT ||
             out.storage_format != DXGI_FORMAT_R32_FLOAT ||
             !a.texture.Get() || !a.srv.Get() ||
             !b.texture.Get() || !b.srv.Get() ||
-            count == 0 || count > a.count || count > b.count)
+            count == 0 || count > a.count || count > b.count ||
+            a.width == 0 || a.height == 0 || b.height == 0)
             return E_INVALIDARG;
-        if (a.width != b.width || a.height != b.height)
+        if (a.width != b.width)
             return E_INVALIDARG;
         if (out.texture.Get() == a.texture.Get() || out.texture.Get() == b.texture.Get())
             return E_INVALIDARG;
+
+        const std::size_t rows_size = count / a.width + (count % a.width != 0 ? 1u : 0u);
+        if (rows_size == 0 || rows_size > a.height || rows_size > b.height ||
+            rows_size > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
+        const UINT rows = static_cast<UINT>(rows_size);
 
         ComPtr<ID3D11VertexShader> vs;
         ComPtr<ID3D11PixelShader> ps;
         HRESULT hr = compile_shaders(op, DXGI_FORMAT_R32_FLOAT, vs, ps);
         if (FAILED(hr)) return hr;
-        hr = arena_texture.prepare_gpu_mem(out, DXGI_FORMAT_R32_FLOAT, count);
+
+        // The output must use the same pixel row width as the inputs. Treat this
+        // as an operation-specific shape rather than retaining a prior GEMM shape.
+        hr = arena_texture.prepare_gpu_mem_matrix(out, DXGI_FORMAT_R32_FLOAT, a.width, rows);
         if (FAILED(hr)) return hr;
-        if (a.width != out.width || a.height != out.height)
+        out.shape_is_user_defined = false;
+        if (!out.texture.Get() || !out.rtv.Get() || out.width != a.width ||
+            out.height < rows)
             return E_INVALIDARG;
 
         D3D11_VIEWPORT vp{};
-        vp.Width = static_cast<float>(out.width);
-        vp.Height = static_cast<float>(out.height);
+        vp.Width = static_cast<float>(a.width);
+        vp.Height = static_cast<float>(rows);
         vp.MinDepth = 0.0f;
         vp.MaxDepth = 1.0f;
         ID3D11RenderTargetView* rtv = out.rtv.Get();

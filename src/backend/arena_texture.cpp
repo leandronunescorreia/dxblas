@@ -545,24 +545,37 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     const UINT bytes = bytes_per_element(format);
     if (!bytes) return E_INVALIDARG;
     const UINT max_dim = static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
-    // Preserve a caller-provided matrix shape when it can contain the payload;
-    // otherwise use the standard contiguous 1D-array packing.
-    UINT width = memory.width;
-    UINT height = memory.height;
-    if (width == 0 || height == 0 || width > max_dim || height > max_dim ||
-        static_cast<std::size_t>(width) * height < count || memory.storage_format != format) {
-        Layout1D layout{};
-        const HRESULT layout_hr = layout_1d(count, layout);
-        if (FAILED(layout_hr)) return layout_hr;
-        width = layout.width;
-        height = layout.height;
+
+    Layout1D layout{};
+    const HRESULT layout_hr = layout_1d(count, layout);
+    if (FAILED(layout_hr)) return layout_hr;
+
+    UINT width = layout.width;
+    UINT height = layout.height;
+    const bool has_explicit_dimensions = memory.width != 0 && memory.height != 0 &&
+        memory.width <= max_dim && memory.height <= max_dim &&
+        static_cast<std::size_t>(memory.width) * memory.height >= count;
+    // Preserve shapes marked by matrix/GEMM helpers. Also honor dimensions set
+    // by callers before the first upload (the gpuMem GEMM sample uses this
+    // compatibility path); once a resource exists, stale dimensions alone do
+    // not override the canonical 1D layout after a reassignment.
+    const bool valid_explicit_shape = memory.storage_format == format &&
+        has_explicit_dimensions &&
+        (memory.shape_is_user_defined || !memory.texture.Get());
+
+    if (valid_explicit_shape) {
+        width = memory.width;
+        height = memory.height;
     }
 
-    // Reuse the GPU texture and views when format and dimensions match. Staging
-    // is deliberately not owned by gpuMem; the context shares one readback target.
-    if (memory.storage_format == format && memory.width == width && memory.height == height &&
+    // Ordinary 1D buffers may reuse a taller allocation, but their row width
+    // must match the canonical layout. This keeps pixel coordinates compatible
+    // with freshly allocated buffers after a shrink/reassignment.
+    if (memory.storage_format == format &&
+        memory.width == width && memory.height >= height &&
         memory.texture && memory.srv && memory.rtv) {
         memory.count = count;
+        memory.shape_is_user_defined = valid_explicit_shape;
         return S_OK;
     }
 
@@ -584,6 +597,7 @@ HRESULT ArenaTexture::prepare_gpu_mem(gpuMemBase& memory, DXGI_FORMAT format, st
     memory.height = height;
     memory.count = count;
     memory.storage_format = format;
+    memory.shape_is_user_defined = valid_explicit_shape;
     return S_OK;
 }
 HRESULT ArenaTexture::prepare_gpu_mem_matrix(gpuMemBase& memory, DXGI_FORMAT format, UINT width, UINT height)
@@ -595,6 +609,7 @@ HRESULT ArenaTexture::prepare_gpu_mem_matrix(gpuMemBase& memory, DXGI_FORMAT for
     if (memory.storage_format == format && memory.width == width && memory.height == height &&
         memory.texture && memory.srv && memory.rtv) {
         memory.count = count;
+        memory.shape_is_user_defined = true;
         return S_OK;
     }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -614,6 +629,7 @@ HRESULT ArenaTexture::prepare_gpu_mem_matrix(gpuMemBase& memory, DXGI_FORMAT for
     memory.height = height;
     memory.count = count;
     memory.storage_format = format;
+    memory.shape_is_user_defined = true;
     return S_OK;
 }
 

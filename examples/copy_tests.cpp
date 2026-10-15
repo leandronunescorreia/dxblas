@@ -161,7 +161,8 @@ void run_move_semantics_case(dxblas::Context& context, int& failures)
         passed = moved_a.texture.Get() == a_texture && moved_a.srv.Get() == a_srv &&
                  moved_a.rtv.Get() == a_rtv && !a.texture && !a.srv && !a.rtv &&
                  a.width == 0 && a.height == 0 && a.count == 0 &&
-                 a.storage_format == DXGI_FORMAT_UNKNOWN && a.data() == nullptr;
+                 a.storage_format == DXGI_FORMAT_UNKNOWN &&
+                 !a.shape_is_user_defined && a.data() == nullptr;
 
         ID3D11Texture2D* const out_texture = out.texture.Get();
         ID3D11ShaderResourceView* const out_srv = out.srv.Get();
@@ -172,9 +173,123 @@ void run_move_semantics_case(dxblas::Context& context, int& failures)
                  moved_out.srv.Get() == out_srv && moved_out.rtv.Get() == out_rtv &&
                  !out.texture && !out.srv && !out.rtv && out.width == 0 &&
                  out.height == 0 && out.count == 0 &&
-                 out.storage_format == DXGI_FORMAT_UNKNOWN && out.data() == nullptr;
+                 out.storage_format == DXGI_FORMAT_UNKNOWN &&
+                 !out.shape_is_user_defined && out.data() == nullptr;
     }
     report("gpuMem move transfers resources and empties source", passed, failures);
+}
+
+void run_explicit_shape_case(dxblas::Context& context, int& failures)
+{
+    constexpr std::size_t count = 100;
+    std::vector<float> values_a(count), values_b(count), expected(count), actual(count);
+    fill_pattern(values_a, 7);
+    fill_pattern(values_b, 19);
+
+    dxblas::gpuMem<float> a(count), b(count), out(count);
+    // Explicit dimensions are used by the resident GEMM path. The inputs have
+    // the same row width but different allocated heights; the requested prefix
+    // still covers ten rows in each texture.
+    a.width = 10; a.height = 10;
+    b.width = 10; b.height = 12;
+    out.width = 10; out.height = 10;
+
+    bool passed = upload_pair(context, a, b, out, values_a, values_b);
+    passed = passed && a.width == 10 && a.height == 10 &&
+             b.width == 10 && b.height == 12 &&
+             a.shape_is_user_defined && b.shape_is_user_defined;
+    if (passed) {
+        // Reupload a shorter prefix; explicitly shaped matrix resources should
+        // retain their row widths/heights instead of reverting to a 1D layout.
+        a.assign(values_a.data(), 50);
+        b.assign(values_b.data(), 50);
+        const HRESULT upload_hr = context.copy(a, b, out, 50);
+        passed = SUCCEEDED(upload_hr) &&
+                 a.width == 10 && a.height == 10 &&
+                 b.width == 10 && b.height == 12 &&
+                 a.shape_is_user_defined && b.shape_is_user_defined;
+    }
+    if (passed) {
+        for (std::size_t i = 0; i < 50; ++i)
+            expected[i] = values_a[i] + values_b[i];
+        const HRESULT hr = context.sum(a, b, out, 50);
+        passed = SUCCEEDED(hr) &&
+                 SUCCEEDED(context.copy_to_cpu(out, actual.data(), 50)) &&
+                 bit_equal(actual, expected, 50) &&
+                 out.width == 10 && out.height == 5;
+    }
+    report("explicit matrix shape retained; arithmetic accepts differing heights",
+           passed, failures);
+}
+
+void run_reuse_arithmetic_case(dxblas::Context& context,
+                               std::size_t large_count,
+                               std::size_t small_count,
+                               const char* label,
+                               int& failures)
+{
+    std::vector<float> initial_a(large_count), initial_b(large_count);
+    std::vector<float> small_a(small_count), small_b(small_count);
+    std::vector<float> expected(small_count), actual(small_count);
+    fill_pattern(initial_a, 1);
+    fill_pattern(initial_b, 2);
+    fill_pattern(small_a, 11);
+    fill_pattern(small_b, 29);
+
+    dxblas::gpuMem<float> a(large_count), initial_peer(large_count), initial_out(large_count);
+    bool passed = upload_pair(context, a, initial_peer, initial_out, initial_a, initial_b);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> old_texture;
+    if (passed) old_texture = a.texture;
+
+    // Keep a's gpuMem object (and its prior allocation) but shrink its pending
+    // CPU payload. b and out are fresh objects with the smaller shape.
+    dxblas::gpuMem<float> b(small_count), out(small_count);
+    if (passed) {
+        a.assign(small_a.data(), small_count);
+        b.assign(small_b.data(), small_count);
+        const HRESULT hr = context.copy(a, b, out, small_count);
+        passed = SUCCEEDED(hr);
+        if (FAILED(hr))
+            std::cerr << "  shrink upload failed: HRESULT 0x" << std::hex
+                      << static_cast<unsigned long>(hr) << std::dec << '\n';
+    }
+
+    if (passed) {
+        passed = a.width == b.width &&
+                 a.width == small_count &&
+                 a.height >= 1 && b.height >= 1 &&
+                 a.texture.Get() != nullptr && a.texture.Get() != old_texture.Get();
+    }
+
+    bool sum_ok = false;
+    bool mul_ok = false;
+    if (passed) {
+        for (std::size_t i = 0; i < small_count; ++i)
+            expected[i] = small_a[i] + small_b[i];
+        HRESULT hr = context.sum(a, b, out, small_count);
+        if (SUCCEEDED(hr)) hr = context.copy_to_cpu(out, actual.data(), small_count);
+        sum_ok = SUCCEEDED(hr) && bit_equal(actual, expected, small_count);
+
+        for (std::size_t i = 0; i < small_count; ++i)
+            expected[i] = small_a[i] * small_b[i];
+        hr = context.mul(a, b, out, small_count);
+        if (SUCCEEDED(hr)) hr = context.copy_to_cpu(out, actual.data(), small_count);
+        mul_ok = SUCCEEDED(hr) && bit_equal(actual, expected, small_count);
+    }
+
+    report(std::string(label) + " shrink/reuse sum", sum_ok, failures);
+    report(std::string(label) + " shrink/reuse mul", mul_ok, failures);
+
+    bool alias_ok = false;
+    if (passed) {
+        const HRESULT sum_alias_a = context.sum(a, b, a, small_count);
+        const HRESULT sum_alias_b = context.sum(a, b, b, small_count);
+        const HRESULT mul_alias_a = context.mul(a, b, a, small_count);
+        const HRESULT mul_alias_b = context.mul(a, b, b, small_count);
+        alias_ok = sum_alias_a == E_INVALIDARG && sum_alias_b == E_INVALIDARG &&
+                   mul_alias_a == E_INVALIDARG && mul_alias_b == E_INVALIDARG;
+    }
+    report(std::string(label) + " rejects output/input texture aliasing", alias_ok, failures);
 }
 
 template<class T>
@@ -315,6 +430,9 @@ int main()
     run_reupload_case<float>(context, "float", failures);
     run_move_semantics_case(context, failures);
     run_shrink_case<float>(context, "float", failures);
+    run_explicit_shape_case(context, failures);
+    run_reuse_arithmetic_case(context, 100, 50, "100 -> 50", failures);
+    run_reuse_arithmetic_case(context, 32769, 255, "32769 -> 255", failures);
     run_prefix_case<float>(context, "float", failures);
     run_batch_size_case(context, 2, failures);
     run_batch_size_case(context, 3, failures);

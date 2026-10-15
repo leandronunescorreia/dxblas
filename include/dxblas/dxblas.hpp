@@ -122,12 +122,14 @@ private:
         height = other.height;
         count = other.count;
         storage_format = other.storage_format;
+        shape_is_user_defined = other.shape_is_user_defined;
         pending_data_ = std::exchange(other.pending_data_, nullptr);
 
         other.width = 0;
         other.height = 0;
         other.count = 0;
         other.storage_format = DXGI_FORMAT_UNKNOWN;
+        other.shape_is_user_defined = false;
     }
 
     void release_pending_data() noexcept { pending_data_ = nullptr; }

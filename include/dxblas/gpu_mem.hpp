@@ -23,6 +23,9 @@ public:
     UINT height = 0;
     std::size_t count = 0;
     DXGI_FORMAT storage_format = DXGI_FORMAT_UNKNOWN;
+    // True only for shapes explicitly requested by matrix/GEMM operations.
+    // Ordinary gpuMem buffers use canonical 1D layouts when their count changes.
+    bool shape_is_user_defined = false;
 };
 
 // One destination in a batched GPU-to-CPU transfer. The caller owns both the
