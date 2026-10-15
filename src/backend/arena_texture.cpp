@@ -371,12 +371,23 @@ HRESULT ArenaTexture::ensure(
         return S_OK;
     };
 
-    UINT new_width = 0;
-    UINT new_height = 0;
-    HRESULT hr = round_up_power_of_two(width, new_width);
+    UINT requested_width = 0;
+    UINT requested_height = 0;
+    HRESULT hr = round_up_power_of_two(width, requested_width);
     if (FAILED(hr)) return hr;
-    hr = round_up_power_of_two(height, new_height);
+    hr = round_up_power_of_two(height, requested_height);
     if (FAILED(hr)) return hr;
+
+    // Capacity is grow-only while formats remain compatible. Preserve each
+    // existing dimension independently so alternating wide/short and
+    // narrow/tall requests do not repeatedly recreate the arena textures.
+    // A format change starts a fresh allocation sized only for the request.
+    const UINT new_width = format_matches
+        ? std::max(capacity_width_, requested_width)
+        : requested_width;
+    const UINT new_height = format_matches
+        ? std::max(capacity_height_, requested_height)
+        : requested_height;
 
     // allocate() creates all replacement textures and views before swapping
     // them into the arena, so a failed growth leaves the old resources intact.
@@ -723,8 +734,6 @@ HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UI
         if (FAILED(dimensions_hr)) return dimensions_hr;
     }
 
-    // Build the replacement separately. If allocation fails, the previous
-    // staging texture and its recorded dimensions remain valid and untouched.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     HRESULT hr = create_texture(device_.Get(), allocation_width, allocation_height,
         staging_format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);

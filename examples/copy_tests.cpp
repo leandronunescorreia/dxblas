@@ -448,6 +448,178 @@ void run_readback_staging_growth_policy_case(int& failures)
     report("readback staging rejects zero-sized request", hr == E_INVALIDARG, failures);
 }
 
+void run_sync_format_sequence_case(dxblas::Context& context, int& failures)
+{
+    const auto check_float_sum = [&](std::size_t count, std::uint32_t salt) {
+        std::vector<float> a(count), b(count), actual(count), expected(count);
+        fill_pattern(a, salt);
+        fill_pattern(b, salt + 13);
+        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] + b[i];
+        const HRESULT hr = context.sum(DXGI_FORMAT_R32_FLOAT,
+            a.data(), b.data(), actual.data(), count);
+        if (FAILED(hr)) {
+            std::cerr << "  sync float sum count=" << count << " failed: HRESULT 0x"
+                      << std::hex << static_cast<unsigned long>(hr) << std::dec << '\n';
+            return false;
+        }
+        const bool data_matches = bit_equal(actual, expected, count);
+        if (!data_matches)
+            std::cerr << "  sync float sum count=" << count << " returned incorrect data\n";
+        return data_matches;
+    };
+
+    // Exercise growth on the same synchronous arena before switching formats.
+    bool passed = check_float_sum(5, 1);
+    const bool larger_same_format_passed = check_float_sum(4097, 7);
+    passed = larger_same_format_passed && passed;
+
+    // Keep byte sums in range so this test checks the format transition and
+    // readback path, rather than relying on overflow conversion semantics.
+    constexpr std::size_t byte_count = 255;
+    std::vector<std::uint8_t> byte_a(byte_count), byte_b(byte_count),
+        byte_actual(byte_count), byte_expected(byte_count);
+    for (std::size_t i = 0; i < byte_count; ++i) {
+        byte_a[i] = static_cast<std::uint8_t>(i % 17u);
+        byte_b[i] = static_cast<std::uint8_t>((i * 3u) % 19u);
+        byte_expected[i] = static_cast<std::uint8_t>(byte_a[i] + byte_b[i]);
+    }
+    HRESULT hr = context.sum(DXGI_FORMAT_R8_UINT, byte_a.data(), byte_b.data(),
+        byte_actual.data(), byte_count);
+    bool byte_passed = SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        std::cerr << "  sync uint8 sum failed: HRESULT 0x" << std::hex
+                  << static_cast<unsigned long>(hr) << std::dec << '\n';
+    } else if (!bit_equal(byte_actual, byte_expected, byte_count)) {
+        std::cerr << "  sync uint8 sum returned incorrect data\n";
+        byte_passed = false;
+    }
+    passed = byte_passed && passed;
+
+    // Returning to float after the format switch must not reuse incompatible
+    // arena textures; this larger request also exercises another capacity growth.
+    const bool larger_float_passed = check_float_sum(16385, 17);
+    passed = larger_float_passed && passed;
+    report("sync API float 5 -> float 4097 -> uint8 -> larger float", passed, failures);
+}
+
+void run_gpu_array_case(dxblas::Context& context, int& failures)
+{
+    constexpr std::size_t count = 257;
+    std::vector<float> a(count), b(count), expected(count), actual(count);
+    fill_pattern(a, 5);
+    fill_pattern(b, 23);
+
+    dxblas::GpuArray gpu_a, gpu_b, gpu_sum, gpu_mul;
+    HRESULT hr = context.upload_gpu(DXGI_FORMAT_R32_FLOAT, a.data(), count, gpu_a);
+    bool passed = SUCCEEDED(hr) && gpu_a.size() == count &&
+        gpu_a.format() == DXGI_FORMAT_R32_FLOAT && static_cast<bool>(gpu_a);
+    if (passed) {
+        hr = context.upload_gpu(DXGI_FORMAT_R32_FLOAT, b.data(), count, gpu_b);
+        passed = SUCCEEDED(hr) && gpu_b.size() == count && static_cast<bool>(gpu_b);
+    }
+    if (passed) {
+        hr = context.sum_gpu(gpu_a, gpu_b, gpu_sum);
+        passed = SUCCEEDED(hr) && gpu_sum.size() == count && static_cast<bool>(gpu_sum);
+    }
+    if (passed) {
+        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] + b[i];
+        hr = context.readback_gpu(gpu_sum, actual.data(), count);
+        passed = SUCCEEDED(hr) && bit_equal(actual, expected, count);
+    }
+    if (passed) {
+        hr = context.mul_gpu(gpu_a, gpu_b, gpu_mul);
+        passed = SUCCEEDED(hr) && gpu_mul.size() == count && static_cast<bool>(gpu_mul);
+    }
+    if (passed) {
+        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] * b[i];
+        hr = context.readback_gpu(gpu_mul, actual.data(), count);
+        passed = SUCCEEDED(hr) && bit_equal(actual, expected, count);
+    }
+    report("GpuArray upload, sum/mul arithmetic, and readback", passed, failures);
+}
+
+void run_duplicate_source_batch_case(dxblas::Context& context, int& failures)
+{
+    constexpr std::size_t count = 4097;
+    std::vector<float> expected(count), peer(count), actual_a(count), actual_b(count);
+    fill_pattern(expected, 31);
+    fill_pattern(peer, 47);
+
+    dxblas::gpuMem<float> source(count), other(count), out(count);
+    bool passed = upload_pair(context, source, other, out, expected, peer);
+    if (passed) {
+        const HRESULT hr = context.copy_to_cpu_batch({
+            {&source, actual_a.data(), count},
+            {&source, actual_b.data(), count},
+        });
+        passed = SUCCEEDED(hr) && bit_equal(actual_a, expected, count) &&
+                 bit_equal(actual_b, expected, count);
+        if (FAILED(hr))
+            std::cerr << "  duplicate-source batch readback failed: HRESULT 0x" << std::hex
+                      << static_cast<unsigned long>(hr) << std::dec << '\n';
+    }
+    report("copy_to_cpu_batch same source to distinct destinations", passed, failures);
+}
+
+void run_arena_grow_only_case(dxblas::Context& context, int& failures)
+{
+    dxblas::NativeD3D11 native{};
+    HRESULT hr = dxblas::get_native_d3d11(context, native);
+    if (FAILED(hr) || !native.device) {
+        report("sync arena grow-only capacity setup", false, failures);
+        return;
+    }
+
+    dxblas::detail::ArenaTexture arena;
+    hr = arena.initialize(native.device);
+    bool passed = SUCCEEDED(hr);
+    if (passed) hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 257, 1);
+    passed = passed && SUCCEEDED(hr) && arena.capacity_width() == 512 &&
+             arena.capacity_height() == 1;
+
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource_before;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource_after;
+    if (passed) {
+        arena.input_a_srv()->GetResource(&resource_before);
+        hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 1, 129);
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 &&
+                 arena.capacity_height() == 256;
+    }
+    if (passed) {
+        arena.input_a_srv()->GetResource(&resource_after);
+        passed = resource_before.Get() != resource_after.Get();
+    }
+
+    // Alternating requests that fit the retained rectangle must not reallocate.
+    Microsoft::WRL::ComPtr<ID3D11Resource> grown_resource;
+    if (passed) {
+        arena.input_a_srv()->GetResource(&grown_resource);
+        hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 257, 1);
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 &&
+                 arena.capacity_height() == 256;
+    }
+    if (passed) {
+        arena.input_a_srv()->GetResource(&resource_after);
+        passed = grown_resource.Get() == resource_after.Get();
+    }
+
+    // A format change must allocate compatible resources and must not inherit
+    // the old format's oversized capacity.
+    Microsoft::WRL::ComPtr<ID3D11Resource> before_format_change;
+    if (passed) {
+        arena.input_a_srv()->GetResource(&before_format_change);
+        hr = arena.ensure(DXGI_FORMAT_R32_SINT, DXGI_FORMAT_R32_FLOAT, 17, 9);
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 32 &&
+                 arena.capacity_height() == 16;
+    }
+    if (passed) {
+        arena.input_a_srv()->GetResource(&resource_after);
+        passed = before_format_change.Get() != resource_after.Get();
+    }
+    report("sync arena capacity grows monotonically and resets on format change",
+           passed, failures);
+}
+
 void run_batch_size_case(dxblas::Context& context, int source_count, int& failures)
 {
     constexpr std::size_t counts[] = {255, 4097, 32769};
@@ -540,6 +712,10 @@ int main()
     run_batch_size_case(context, 2, failures);
     run_batch_size_case(context, 3, failures);
     run_readback_staging_growth_policy_case(failures);
+    run_arena_grow_only_case(context, failures);
+    run_sync_format_sequence_case(context, failures);
+    run_gpu_array_case(context, failures);
+    run_duplicate_source_batch_case(context, failures);
 
     run_mixed_format_case<float>(context, "mixed float #1", failures);
     run_mixed_format_case<std::int32_t>(context, "mixed int32", failures);
