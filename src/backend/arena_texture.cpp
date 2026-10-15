@@ -191,6 +191,59 @@ HRESULT layout_1d(std::size_t count, Layout1D& out)
         count, static_cast<UINT>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION), out);
 }
 
+HRESULT readback_staging_dimensions(
+    UINT current_width, UINT current_height, UINT request_width, UINT request_height,
+    UINT& allocation_width, UINT& allocation_height)
+{
+    if (request_width == 0 || request_height == 0 ||
+        request_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        request_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        current_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        current_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+        return E_INVALIDARG;
+
+    const auto area = [](UINT width, UINT height, std::size_t& result) -> bool {
+        if (width == 0 || height == 0) {
+            result = 0;
+            return true;
+        }
+        if (static_cast<std::size_t>(height) >
+            std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(width))
+            return false;
+        result = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        return true;
+    };
+
+    std::size_t current_area = 0;
+    std::size_t request_area = 0;
+    if (!area(current_width, current_height, current_area) ||
+        !area(request_width, request_height, request_area))
+        return E_INVALIDARG;
+
+    const UINT combined_width = std::max(current_width, request_width);
+    const UINT combined_height = std::max(current_height, request_height);
+    std::size_t combined_area = 0;
+    if (!area(combined_width, combined_height, combined_area))
+        return E_INVALIDARG;
+
+    const std::size_t larger_area = std::max(current_area, request_area);
+    const std::size_t max_area = std::numeric_limits<std::size_t>::max();
+    const std::size_t area_limit = larger_area > max_area / 2
+        ? max_area : larger_area * 2;
+
+    // Keep independent maxima only when their combined rectangle is at most
+    // about 2x the larger existing/requested area. Otherwise size for this
+    // request alone; future requests can grow the staging texture again.
+    if (combined_area > area_limit) {
+        allocation_width = request_width;
+        allocation_height = request_height;
+    } else {
+        allocation_width = combined_width;
+        allocation_height = combined_height;
+    }
+    return S_OK;
+}
+
 HRESULT GpuTimer::initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (!device || !context) return E_INVALIDARG;
@@ -658,15 +711,20 @@ HRESULT ArenaTexture::ensure_readback_staging(DXGI_FORMAT format, UINT width, UI
         shared_staging_width_ >= width && shared_staging_height_ >= height;
     if (reusable) return S_OK;
 
-    // Keep the largest dimensions requested for this element-size class.
     // Typed formats with the same element size share a typeless staging resource.
+    // Retain independent dimension maxima only when their area stays within the
+    // bounded-growth policy; otherwise allocate for this request alone.
     UINT allocation_width = width;
     UINT allocation_height = height;
     if (shared_staging_format_ == staging_format) {
-        allocation_width = std::max(allocation_width, shared_staging_width_);
-        allocation_height = std::max(allocation_height, shared_staging_height_);
+        const HRESULT dimensions_hr = readback_staging_dimensions(
+            shared_staging_width_, shared_staging_height_, width, height,
+            allocation_width, allocation_height);
+        if (FAILED(dimensions_hr)) return dimensions_hr;
     }
 
+    // Build the replacement separately. If allocation fails, the previous
+    // staging texture and its recorded dimensions remain valid and untouched.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     HRESULT hr = create_texture(device_.Get(), allocation_width, allocation_height,
         staging_format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, staging);

@@ -21,6 +21,12 @@ struct Layout1D {
 
 HRESULT layout_1d(std::size_t count, Layout1D& out);
 
+// Select staging dimensions for a growth request without allowing independent
+// dimension maxima to inflate allocation area beyond the bounded-growth policy.
+HRESULT readback_staging_dimensions(
+    UINT current_width, UINT current_height, UINT request_width, UINT request_height,
+    UINT& allocation_width, UINT& allocation_height);
+
 // Internal D3D11 timestamp timer used by copy_timing. The timer owns its
 // queries and retains the device/context supplied at initialization.
 class GpuTimer final {
@@ -104,6 +110,8 @@ public:
 
     UINT capacity_width() const noexcept { return capacity_width_; }
     UINT capacity_height() const noexcept { return capacity_height_; }
+    UINT readback_staging_width() const noexcept { return shared_staging_width_; }
+    UINT readback_staging_height() const noexcept { return shared_staging_height_; }
 
 private:
     HRESULT allocate(

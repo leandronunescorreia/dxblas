@@ -1,4 +1,5 @@
 #include <dxblas/dxblas.hpp>
+#include "../src/backend/arena_texture.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -345,6 +346,108 @@ void run_prefix_case(dxblas::Context& context, const char* type_name, int& failu
            "/" + std::to_string(count), passed, failures);
 }
 
+void run_readback_staging_growth_policy_case(int& failures)
+{
+    using dxblas::detail::ArenaTexture;
+    constexpr UINT wide = 16384;
+    constexpr UINT narrow = 2;
+
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL feature_level{};
+    HRESULT hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_DEBUG,
+        nullptr, 0, D3D11_SDK_VERSION, &device, &feature_level, &context);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION, &device, &feature_level, &context);
+    }
+    if (FAILED(hr)) {
+        report("readback staging growth policy device initialization", false, failures);
+        return;
+    }
+
+    const auto exercise_order = [&](UINT first_width, UINT first_height,
+                                    UINT second_width, UINT second_height,
+                                    const char* label) {
+        ArenaTexture arena;
+        HRESULT case_hr = arena.initialize(device.Get());
+        const auto read_shape = [&](UINT width, UINT height) -> bool {
+            const std::size_t count = static_cast<std::size_t>(width) * height;
+            std::vector<float> expected(count);
+            std::vector<float> actual(count);
+            for (std::size_t i = 0; i < count; ++i)
+                expected[i] = (static_cast<float>(i % 251) - 125.0f) * 0.125f;
+
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R32_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+            HRESULT local_hr = device->CreateTexture2D(&desc, nullptr, &texture);
+            if (FAILED(local_hr)) {
+                case_hr = local_hr;
+                return false;
+            }
+            context->UpdateSubresource(texture.Get(), 0, nullptr, expected.data(),
+                width * static_cast<UINT>(sizeof(float)), 0);
+
+            dxblas::gpuMemBase memory;
+            memory.texture = texture;
+            memory.width = width;
+            memory.height = height;
+            memory.count = count;
+            memory.storage_format = DXGI_FORMAT_R32_FLOAT;
+            local_hr = arena.readback_gpu_mem(context.Get(), memory, actual.data(), count);
+            if (FAILED(local_hr)) {
+                case_hr = local_hr;
+                return false;
+            }
+            if (!bit_equal(actual, expected, count)) {
+                case_hr = E_FAIL;
+                return false;
+            }
+            return true;
+        };
+
+        bool passed = SUCCEEDED(case_hr) && read_shape(first_width, first_height);
+        passed = passed && arena.readback_staging_width() == first_width &&
+                 arena.readback_staging_height() == first_height;
+        passed = passed && read_shape(second_width, second_height);
+        const UINT expected_width = second_width;
+        const UINT expected_height = second_height;
+        const std::size_t current_area =
+            static_cast<std::size_t>(arena.readback_staging_width()) * arena.readback_staging_height();
+        const std::size_t request_area = static_cast<std::size_t>(second_width) * second_height;
+        const std::size_t prior_area = static_cast<std::size_t>(first_width) * first_height;
+        passed = passed && arena.readback_staging_width() == expected_width &&
+                 arena.readback_staging_height() == expected_height &&
+                 current_area <= 2 * std::max(prior_area, request_area);
+        report(label, passed, failures);
+    };
+
+    exercise_order(wide, 1, narrow, wide,
+                   "readback staging bounds wide-short -> narrow-tall growth");
+    exercise_order(narrow, wide, wide, 1,
+                   "readback staging bounds narrow-tall -> wide-short growth");
+
+    UINT width = 0;
+    UINT height = 0;
+    hr = dxblas::detail::readback_staging_dimensions(128, 32, 64, 64, width, height);
+    report("readback staging keeps bounded combined growth", SUCCEEDED(hr) &&
+        width == 128 && height == 64, failures);
+    hr = dxblas::detail::readback_staging_dimensions(0, 0, wide, 1, width, height);
+    report("readback staging first allocation uses request dimensions", SUCCEEDED(hr) &&
+        width == wide && height == 1, failures);
+    hr = dxblas::detail::readback_staging_dimensions(wide, 1, 0, wide, width, height);
+    report("readback staging rejects zero-sized request", hr == E_INVALIDARG, failures);
+}
+
 void run_batch_size_case(dxblas::Context& context, int source_count, int& failures)
 {
     constexpr std::size_t counts[] = {255, 4097, 32769};
@@ -436,6 +539,7 @@ int main()
     run_prefix_case<float>(context, "float", failures);
     run_batch_size_case(context, 2, failures);
     run_batch_size_case(context, 3, failures);
+    run_readback_staging_growth_policy_case(failures);
 
     run_mixed_format_case<float>(context, "mixed float #1", failures);
     run_mixed_format_case<std::int32_t>(context, "mixed int32", failures);
