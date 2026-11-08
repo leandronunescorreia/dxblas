@@ -11,15 +11,13 @@
 
 using Clock = std::chrono::steady_clock;
 
-static void print_hresult(const char* operation, HRESULT hr)
-{
-    std::cerr << operation << " failed: HRESULT 0x" << std::hex
-              << static_cast<unsigned long>(hr) << std::dec << '\n';
+static void print_hresult(const char* operation, HRESULT hr) {
+    std::cerr << operation << " failed: HRESULT 0x" << std::hex << static_cast<unsigned long>(hr)
+              << std::dec << '\n';
 }
 
-int main()
-{
-    constexpr std::size_t count = 8192*8192;
+int main() {
+    constexpr std::size_t count = 8192 * 8192;
     constexpr std::uint32_t seed = 0xD1B1A5u;
     std::cout << "DXBLAS gpuMem FP32 sum vs C++ CPU sum\n"
               << "Elements per input: " << count << " ("
@@ -83,7 +81,8 @@ int main()
     float max_abs_error = 0.0f;
     for (std::size_t i = 0; i < count; ++i) {
         const float error = std::fabs(cpu_result[i] - gpu_result[i]);
-        if (error > max_abs_error) max_abs_error = error;
+        if (error > max_abs_error)
+            max_abs_error = error;
         if (error > 1e-5f) {
             if (mismatches < 5)
                 std::cerr << "Mismatch at " << i << ": CPU=" << cpu_result[i]
@@ -92,10 +91,14 @@ int main()
         }
     }
 
-    const double upload_ms = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
-    const double sum_ms = std::chrono::duration<double, std::milli>(gpu_sum_end - gpu_sum_start).count();
-    const double readback_ms = std::chrono::duration<double, std::milli>(readback_end - readback_start).count();
-    const double gpu_total_ms = std::chrono::duration<double, std::milli>(readback_end - upload_start).count();
+    const double upload_ms =
+        std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
+    const double sum_ms =
+        std::chrono::duration<double, std::milli>(gpu_sum_end - gpu_sum_start).count();
+    const double readback_ms =
+        std::chrono::duration<double, std::milli>(readback_end - readback_start).count();
+    const double gpu_total_ms =
+        std::chrono::duration<double, std::milli>(readback_end - upload_start).count();
 
     std::cout << std::fixed << std::setprecision(3)
               << "\nCPU C++ sum (arithmetic only) : " << cpu_ms << " ms\n"
@@ -113,6 +116,7 @@ int main()
         return 5;
     }
     std::cout << "Validation PASSED\n";
-    std::cout << "Note: GPU sum submission measures command submission; readback synchronizes completion.\n";
+    std::cout << "Note: GPU sum submission measures command submission; readback synchronizes "
+                 "completion.\n";
     return 0;
 }

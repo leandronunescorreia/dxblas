@@ -26,45 +26,38 @@ struct Sample {
     double readback_cpu_ms = std::numeric_limits<double>::quiet_NaN();
 };
 
-double median(std::vector<double> values)
-{
-    values.erase(std::remove_if(values.begin(), values.end(), [](double value) {
-        return !std::isfinite(value);
-    }), values.end());
-    if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+double median(std::vector<double> values) {
+    values.erase(std::remove_if(values.begin(), values.end(),
+                                [](double value) { return !std::isfinite(value); }),
+                 values.end());
+    if (values.empty())
+        return std::numeric_limits<double>::quiet_NaN();
     const auto middle = values.begin() + values.size() / 2;
     std::nth_element(values.begin(), middle, values.end());
-    if (values.size() % 2 != 0) return *middle;
+    if (values.size() % 2 != 0)
+        return *middle;
     const double upper = *middle;
     const double lower = *std::max_element(values.begin(), middle);
     return (lower + upper) * 0.5;
 }
 
-double effective_gb_s(std::size_t bytes, double milliseconds)
-{
+double effective_gb_s(std::size_t bytes, double milliseconds) {
     if (!std::isfinite(milliseconds) || milliseconds <= 0.0)
         return std::numeric_limits<double>::quiet_NaN();
     return static_cast<double>(bytes) / (milliseconds * 1.0e6);
 }
 
-void print_number(double value, int precision = 3)
-{
+void print_number(double value, int precision = 3) {
     if (std::isfinite(value))
         std::cout << std::setw(12) << std::fixed << std::setprecision(precision) << value;
     else
         std::cout << std::setw(12) << "n/a";
 }
 
-bool run_sample(dxblas::Context& context,
-                dxblas::detail::GpuTimer& timer,
-                dxblas::gpuMem<float>& a,
-                dxblas::gpuMem<float>& b,
-                dxblas::gpuMem<float>& out,
-                const std::vector<float>& data_a,
-                const std::vector<float>& data_b,
-                std::vector<float>& readback,
-                Sample& sample)
-{
+bool run_sample(dxblas::Context& context, dxblas::detail::GpuTimer& timer, dxblas::gpuMem<float>& a,
+                dxblas::gpuMem<float>& b, dxblas::gpuMem<float>& out,
+                const std::vector<float>& data_a, const std::vector<float>& data_b,
+                std::vector<float>& readback, Sample& sample) {
     a.assign(data_a.data(), data_a.size());
     b.assign(data_b.data(), data_b.size());
 
@@ -88,7 +81,8 @@ bool run_sample(dxblas::Context& context,
                   << static_cast<unsigned long>(timer_end_hr) << std::dec << '\n';
         return false;
     }
-    sample.upload_cpu_ms = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
+    sample.upload_cpu_ms =
+        std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
     // The query measures GPU timeline time between timestamps around Context::copy.
     // It is intentionally collected outside the CPU wall-time interval above.
     sample.upload_gpu_ms = timer.elapsed_ms();
@@ -101,15 +95,13 @@ bool run_sample(dxblas::Context& context,
                   << static_cast<unsigned long>(hr) << std::dec << '\n';
         return false;
     }
-    sample.readback_cpu_ms = std::chrono::duration<double, std::milli>(readback_end - readback_start).count();
+    sample.readback_cpu_ms =
+        std::chrono::duration<double, std::milli>(readback_end - readback_start).count();
     return true;
 }
 
-bool run_size(dxblas::Context& context,
-              dxblas::detail::GpuTimer& timer,
-              const char* size_label,
-              std::size_t count)
-{
+bool run_size(dxblas::Context& context, dxblas::detail::GpuTimer& timer, const char* size_label,
+              std::size_t count) {
     const std::size_t bytes = count * sizeof(float);
     std::vector<float> data_a(count, 1.25f);
     std::vector<float> data_b(count, 2.5f);
@@ -144,24 +136,31 @@ bool run_size(dxblas::Context& context,
     const std::size_t upload_bytes = bytes * 2;
 
     std::cout << std::left << std::setw(10) << size_label << std::right << " | ";
-    print_number(upload_cpu_ms); std::cout << " | ";
-    print_number(effective_gb_s(upload_bytes, upload_cpu_ms)); std::cout << " | ";
-    print_number(upload_gpu_ms); std::cout << " | ";
-    print_number(effective_gb_s(upload_bytes, upload_gpu_ms)); std::cout << " | ";
-    print_number(readback_cpu_ms); std::cout << " | ";
-    print_number(effective_gb_s(bytes, readback_cpu_ms)); std::cout << '\n';
+    print_number(upload_cpu_ms);
+    std::cout << " | ";
+    print_number(effective_gb_s(upload_bytes, upload_cpu_ms));
+    std::cout << " | ";
+    print_number(upload_gpu_ms);
+    std::cout << " | ";
+    print_number(effective_gb_s(upload_bytes, upload_gpu_ms));
+    std::cout << " | ";
+    print_number(readback_cpu_ms);
+    std::cout << " | ";
+    print_number(effective_gb_s(bytes, readback_cpu_ms));
+    std::cout << '\n';
     return true;
 }
 
 } // namespace
 
-int main()
-{
+int main() {
     std::cout << "dxblas_copy_timing: D3D11 upload/readback timing (float32)\n"
-              << "CPU upload time measures Context::copy submission; GPU time is the timestamped region around that call.\n"
+              << "CPU upload time measures Context::copy submission; GPU time is the timestamped "
+                 "region around that call.\n"
               << "Effective throughput uses decimal GB/s; upload counts both input buffers.\n"
-              << "Warm-up: " << kWarmupIterations << ", measured iterations: "
-              << kMeasuredIterations << ", reported statistic: median\n\n";
+              << "Warm-up: " << kWarmupIterations
+              << ", measured iterations: " << kMeasuredIterations
+              << ", reported statistic: median\n\n";
 
     dxblas::Context context;
     HRESULT hr = context.initialize();
@@ -193,17 +192,17 @@ int main()
 
     constexpr std::size_t kib = 1024;
     constexpr std::size_t mib = 1024 * kib;
-    const std::size_t sizes[] = {kib / sizeof(float), mib / sizeof(float),
-        16 * mib / sizeof(float), 256 * mib / sizeof(float)};
+    const std::size_t sizes[] = {kib / sizeof(float), mib / sizeof(float), 16 * mib / sizeof(float),
+                                 256 * mib / sizeof(float)};
     const char* labels[] = {"1 KiB", "1 MiB", "16 MiB", "256 MiB"};
 
-    std::cout << std::left << std::setw(10) << "Size" << " | "
-              << std::right << std::setw(13) << "Upload CPU ms" << " | "
-              << std::setw(13) << "Upload GB/s" << " | "
-              << std::setw(12) << "Upload GPU ms" << " | "
-              << std::setw(12) << "GPU GB/s" << " | "
-              << std::setw(14) << "Readback CPU ms" << " | "
-              << std::setw(12) << "Readback GB/s\n";
+    std::cout << std::left << std::setw(10) << "Size"
+              << " | " << std::right << std::setw(13) << "Upload CPU ms"
+              << " | " << std::setw(13) << "Upload GB/s"
+              << " | " << std::setw(12) << "Upload GPU ms"
+              << " | " << std::setw(12) << "GPU GB/s"
+              << " | " << std::setw(14) << "Readback CPU ms"
+              << " | " << std::setw(12) << "Readback GB/s\n";
     std::cout << std::string(104, '-') << '\n';
 
     bool passed = true;

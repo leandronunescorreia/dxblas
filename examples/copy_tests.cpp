@@ -21,52 +21,43 @@ static_assert(std::is_move_assignable_v<dxblas::gpuMem<float>>,
 
 namespace {
 
-constexpr std::size_t kSizes[] = {
-    1, 2, 5, 255, 4095, 4096, 4097, 16383, 16384, 16385,
-    32768, 32769, 1'000'003
-};
+constexpr std::size_t kSizes[] = {1,     2,     5,     255,   4095,  4096,     4097,
+                                  16383, 16384, 16385, 32768, 32769, 1'000'003};
 
-template<class T>
-void fill_pattern(std::vector<T>& values, std::uint32_t salt = 0)
-{
+template <class T> void fill_pattern(std::vector<T>& values, std::uint32_t salt = 0) {
     for (std::size_t i = 0; i < values.size(); ++i) {
         if constexpr (std::is_floating_point_v<T>) {
             values[i] = static_cast<T>(i + salt) * static_cast<T>(0.25);
         } else {
             using U = std::make_unsigned_t<T>;
-            const U bits = static_cast<U>(
-                static_cast<std::uint32_t>(i + salt) * 2654435761u);
+            const U bits = static_cast<U>(static_cast<std::uint32_t>(i + salt) * 2654435761u);
             std::memcpy(&values[i], &bits, sizeof(T));
         }
     }
 }
 
-template<class T>
-bool bit_equal(const std::vector<T>& actual, const std::vector<T>& expected,
-               std::size_t count)
-{
+template <class T>
+bool bit_equal(const std::vector<T>& actual, const std::vector<T>& expected, std::size_t count) {
     return actual.size() >= count && expected.size() >= count &&
-        (count == 0 || std::memcmp(actual.data(), expected.data(), count * sizeof(T)) == 0);
+           (count == 0 || std::memcmp(actual.data(), expected.data(), count * sizeof(T)) == 0);
 }
 
-void report(const std::string& label, bool passed, int& failures)
-{
+void report(const std::string& label, bool passed, int& failures) {
     std::cout << (passed ? "[PASS] " : "[FAIL] ") << label << '\n';
-    if (!passed) ++failures;
+    if (!passed)
+        ++failures;
 }
 
-template<class T>
-bool upload_pair(dxblas::Context& context,
-                 dxblas::gpuMem<T>& a,
-                 dxblas::gpuMem<T>& b,
-                 dxblas::gpuMem<T>& out,
-                 const std::vector<T>& values_a,
-                 const std::vector<T>& values_b)
-{
-    if (values_a.size() != values_b.size()) return false;
+template <class T>
+bool upload_pair(dxblas::Context& context, dxblas::gpuMem<T>& a, dxblas::gpuMem<T>& b,
+                 dxblas::gpuMem<T>& out, const std::vector<T>& values_a,
+                 const std::vector<T>& values_b) {
+    if (values_a.size() != values_b.size())
+        return false;
     a.assign(values_a.data(), values_a.size());
     b.assign(values_b.data(), values_b.size());
-    if (out.size() != values_a.size()) out = dxblas::gpuMem<T>(values_a.size());
+    if (out.size() != values_a.size())
+        out = dxblas::gpuMem<T>(values_a.size());
 
     const HRESULT hr = context.copy(a, b, out, values_a.size());
     if (FAILED(hr)) {
@@ -77,10 +68,9 @@ bool upload_pair(dxblas::Context& context,
     return true;
 }
 
-template<class T>
-void run_size_case(dxblas::Context& context, std::size_t count,
-                   const char* type_name, int& failures)
-{
+template <class T>
+void run_size_case(dxblas::Context& context, std::size_t count, const char* type_name,
+                   int& failures) {
     std::vector<T> expected_a(count), expected_b(count), actual_a(count), actual_b(count);
     fill_pattern(expected_a, 0);
     fill_pattern(expected_b, 37);
@@ -97,23 +87,21 @@ void run_size_case(dxblas::Context& context, std::size_t count,
                       << static_cast<unsigned long>(hr) << std::dec << '\n';
             passed = false;
         } else {
-            passed = bit_equal(actual_a, expected_a, count) &&
-                     bit_equal(actual_b, expected_b, count);
+            passed =
+                bit_equal(actual_a, expected_a, count) && bit_equal(actual_b, expected_b, count);
         }
     }
     report(std::string(type_name) + " count=" + std::to_string(count), passed, failures);
 }
 
-template<class T>
-void run_type_sizes(dxblas::Context& context, const char* type_name, int& failures)
-{
+template <class T>
+void run_type_sizes(dxblas::Context& context, const char* type_name, int& failures) {
     for (const auto count : kSizes)
         run_size_case<T>(context, count, type_name, failures);
 }
 
-template<class T>
-void run_reupload_case(dxblas::Context& context, const char* type_name, int& failures)
-{
+template <class T>
+void run_reupload_case(dxblas::Context& context, const char* type_name, int& failures) {
     constexpr std::size_t count = 4097;
     std::vector<T> first_a(count), first_b(count), second_a(count), second_b(count);
     std::vector<T> actual_a(count), actual_b(count);
@@ -145,8 +133,7 @@ void run_reupload_case(dxblas::Context& context, const char* type_name, int& fai
     report(std::string(type_name) + " same-size reupload reuses texture", texture_reused, failures);
 }
 
-void run_move_semantics_case(dxblas::Context& context, int& failures)
-{
+void run_move_semantics_case(dxblas::Context& context, int& failures) {
     constexpr std::size_t count = 4097;
     std::vector<float> values_a(count), values_b(count);
     fill_pattern(values_a, 17);
@@ -160,9 +147,8 @@ void run_move_semantics_case(dxblas::Context& context, int& failures)
         ID3D11RenderTargetView* const a_rtv = a.rtv.Get();
         dxblas::gpuMem<float> moved_a(std::move(a));
         passed = moved_a.texture.Get() == a_texture && moved_a.srv.Get() == a_srv &&
-                 moved_a.rtv.Get() == a_rtv && !a.texture && !a.srv && !a.rtv &&
-                 a.width == 0 && a.height == 0 && a.count == 0 &&
-                 a.storage_format == DXGI_FORMAT_UNKNOWN &&
+                 moved_a.rtv.Get() == a_rtv && !a.texture && !a.srv && !a.rtv && a.width == 0 &&
+                 a.height == 0 && a.count == 0 && a.storage_format == DXGI_FORMAT_UNKNOWN &&
                  !a.shape_is_user_defined && a.data() == nullptr;
 
         ID3D11Texture2D* const out_texture = out.texture.Get();
@@ -171,17 +157,15 @@ void run_move_semantics_case(dxblas::Context& context, int& failures)
         dxblas::gpuMem<float> moved_out(1);
         moved_out = std::move(out);
         passed = passed && moved_out.texture.Get() == out_texture &&
-                 moved_out.srv.Get() == out_srv && moved_out.rtv.Get() == out_rtv &&
-                 !out.texture && !out.srv && !out.rtv && out.width == 0 &&
-                 out.height == 0 && out.count == 0 &&
-                 out.storage_format == DXGI_FORMAT_UNKNOWN &&
-                 !out.shape_is_user_defined && out.data() == nullptr;
+                 moved_out.srv.Get() == out_srv && moved_out.rtv.Get() == out_rtv && !out.texture &&
+                 !out.srv && !out.rtv && out.width == 0 && out.height == 0 && out.count == 0 &&
+                 out.storage_format == DXGI_FORMAT_UNKNOWN && !out.shape_is_user_defined &&
+                 out.data() == nullptr;
     }
     report("gpuMem move transfers resources and empties source", passed, failures);
 }
 
-void run_explicit_shape_case(dxblas::Context& context, int& failures)
-{
+void run_explicit_shape_case(dxblas::Context& context, int& failures) {
     constexpr std::size_t count = 100;
     std::vector<float> values_a(count), values_b(count), expected(count), actual(count);
     fill_pattern(values_a, 7);
@@ -191,13 +175,15 @@ void run_explicit_shape_case(dxblas::Context& context, int& failures)
     // Explicit dimensions are used by the resident GEMM path. The inputs have
     // the same row width but different allocated heights; the requested prefix
     // still covers ten rows in each texture.
-    a.width = 10; a.height = 10;
-    b.width = 10; b.height = 12;
-    out.width = 10; out.height = 10;
+    a.width = 10;
+    a.height = 10;
+    b.width = 10;
+    b.height = 12;
+    out.width = 10;
+    out.height = 10;
 
     bool passed = upload_pair(context, a, b, out, values_a, values_b);
-    passed = passed && a.width == 10 && a.height == 10 &&
-             b.width == 10 && b.height == 12 &&
+    passed = passed && a.width == 10 && a.height == 10 && b.width == 10 && b.height == 12 &&
              a.shape_is_user_defined && b.shape_is_user_defined;
     if (passed) {
         // Reupload a shorter prefix; explicitly shaped matrix resources should
@@ -205,30 +191,22 @@ void run_explicit_shape_case(dxblas::Context& context, int& failures)
         a.assign(values_a.data(), 50);
         b.assign(values_b.data(), 50);
         const HRESULT upload_hr = context.copy(a, b, out, 50);
-        passed = SUCCEEDED(upload_hr) &&
-                 a.width == 10 && a.height == 10 &&
-                 b.width == 10 && b.height == 12 &&
-                 a.shape_is_user_defined && b.shape_is_user_defined;
+        passed = SUCCEEDED(upload_hr) && a.width == 10 && a.height == 10 && b.width == 10 &&
+                 b.height == 12 && a.shape_is_user_defined && b.shape_is_user_defined;
     }
     if (passed) {
         for (std::size_t i = 0; i < 50; ++i)
             expected[i] = values_a[i] + values_b[i];
         const HRESULT hr = context.sum(a, b, out, 50);
-        passed = SUCCEEDED(hr) &&
-                 SUCCEEDED(context.copy_to_cpu(out, actual.data(), 50)) &&
-                 bit_equal(actual, expected, 50) &&
-                 out.width == 10 && out.height == 5;
+        passed = SUCCEEDED(hr) && SUCCEEDED(context.copy_to_cpu(out, actual.data(), 50)) &&
+                 bit_equal(actual, expected, 50) && out.width == 10 && out.height == 5;
     }
-    report("explicit matrix shape retained; arithmetic accepts differing heights",
-           passed, failures);
+    report("explicit matrix shape retained; arithmetic accepts differing heights", passed,
+           failures);
 }
 
-void run_reuse_arithmetic_case(dxblas::Context& context,
-                               std::size_t large_count,
-                               std::size_t small_count,
-                               const char* label,
-                               int& failures)
-{
+void run_reuse_arithmetic_case(dxblas::Context& context, std::size_t large_count,
+                               std::size_t small_count, const char* label, int& failures) {
     std::vector<float> initial_a(large_count), initial_b(large_count);
     std::vector<float> small_a(small_count), small_b(small_count);
     std::vector<float> expected(small_count), actual(small_count);
@@ -240,7 +218,8 @@ void run_reuse_arithmetic_case(dxblas::Context& context,
     dxblas::gpuMem<float> a(large_count), initial_peer(large_count), initial_out(large_count);
     bool passed = upload_pair(context, a, initial_peer, initial_out, initial_a, initial_b);
     Microsoft::WRL::ComPtr<ID3D11Texture2D> old_texture;
-    if (passed) old_texture = a.texture;
+    if (passed)
+        old_texture = a.texture;
 
     // Keep a's gpuMem object (and its prior allocation) but shrink its pending
     // CPU payload. b and out are fresh objects with the smaller shape.
@@ -256,9 +235,7 @@ void run_reuse_arithmetic_case(dxblas::Context& context,
     }
 
     if (passed) {
-        passed = a.width == b.width &&
-                 a.width == small_count &&
-                 a.height >= 1 && b.height >= 1 &&
+        passed = a.width == b.width && a.width == small_count && a.height >= 1 && b.height >= 1 &&
                  a.texture.Get() != nullptr && a.texture.Get() != old_texture.Get();
     }
 
@@ -268,13 +245,15 @@ void run_reuse_arithmetic_case(dxblas::Context& context,
         for (std::size_t i = 0; i < small_count; ++i)
             expected[i] = small_a[i] + small_b[i];
         HRESULT hr = context.sum(a, b, out, small_count);
-        if (SUCCEEDED(hr)) hr = context.copy_to_cpu(out, actual.data(), small_count);
+        if (SUCCEEDED(hr))
+            hr = context.copy_to_cpu(out, actual.data(), small_count);
         sum_ok = SUCCEEDED(hr) && bit_equal(actual, expected, small_count);
 
         for (std::size_t i = 0; i < small_count; ++i)
             expected[i] = small_a[i] * small_b[i];
         hr = context.mul(a, b, out, small_count);
-        if (SUCCEEDED(hr)) hr = context.copy_to_cpu(out, actual.data(), small_count);
+        if (SUCCEEDED(hr))
+            hr = context.copy_to_cpu(out, actual.data(), small_count);
         mul_ok = SUCCEEDED(hr) && bit_equal(actual, expected, small_count);
     }
 
@@ -293,9 +272,8 @@ void run_reuse_arithmetic_case(dxblas::Context& context,
     report(std::string(label) + " rejects output/input texture aliasing", alias_ok, failures);
 }
 
-template<class T>
-void run_shrink_case(dxblas::Context& context, const char* type_name, int& failures)
-{
+template <class T>
+void run_shrink_case(dxblas::Context& context, const char* type_name, int& failures) {
     constexpr std::size_t large_count = 32769;
     constexpr std::size_t small_count = 255;
     std::vector<T> large_a(large_count), large_b(large_count);
@@ -308,7 +286,8 @@ void run_shrink_case(dxblas::Context& context, const char* type_name, int& failu
 
     dxblas::gpuMem<T> a(large_count), b(large_count), out(large_count);
     bool passed = upload_pair(context, a, b, out, large_a, large_b);
-    if (passed) passed = upload_pair(context, a, b, out, small_a, small_b);
+    if (passed)
+        passed = upload_pair(context, a, b, out, small_a, small_b);
     if (passed) {
         const HRESULT hr = context.copy_to_cpu_batch({
             {&a, actual_a.data(), small_count},
@@ -320,14 +299,13 @@ void run_shrink_case(dxblas::Context& context, const char* type_name, int& failu
             std::cerr << "  smaller-upload readback failed: HRESULT 0x" << std::hex
                       << static_cast<unsigned long>(hr) << std::dec << '\n';
     }
-    report(std::string(type_name) + " smaller overwrite " +
-           std::to_string(large_count) + " -> " + std::to_string(small_count),
+    report(std::string(type_name) + " smaller overwrite " + std::to_string(large_count) + " -> " +
+               std::to_string(small_count),
            passed, failures);
 }
 
-template<class T>
-void run_prefix_case(dxblas::Context& context, const char* type_name, int& failures)
-{
+template <class T>
+void run_prefix_case(dxblas::Context& context, const char* type_name, int& failures) {
     constexpr std::size_t count = 4097;
     constexpr std::size_t prefix = 255;
     std::vector<T> expected_a(count), expected_b(count), actual(prefix);
@@ -342,12 +320,12 @@ void run_prefix_case(dxblas::Context& context, const char* type_name, int& failu
             std::cerr << "  prefix readback failed: HRESULT 0x" << std::hex
                       << static_cast<unsigned long>(hr) << std::dec << '\n';
     }
-    report(std::string(type_name) + " prefix readback " + std::to_string(prefix) +
-           "/" + std::to_string(count), passed, failures);
+    report(std::string(type_name) + " prefix readback " + std::to_string(prefix) + "/" +
+               std::to_string(count),
+           passed, failures);
 }
 
-void run_readback_staging_growth_policy_case(int& failures)
-{
+void run_readback_staging_growth_policy_case(int& failures) {
     using dxblas::detail::ArenaTexture;
     constexpr UINT wide = 16384;
     constexpr UINT narrow = 2;
@@ -355,22 +333,20 @@ void run_readback_staging_growth_policy_case(int& failures)
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL feature_level{};
-    HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_DEBUG,
-        nullptr, 0, D3D11_SDK_VERSION, &device, &feature_level, &context);
+    HRESULT hr =
+        D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_DEBUG,
+                          nullptr, 0, D3D11_SDK_VERSION, &device, &feature_level, &context);
     if (FAILED(hr)) {
-        hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-            nullptr, 0, D3D11_SDK_VERSION, &device, &feature_level, &context);
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                               D3D11_SDK_VERSION, &device, &feature_level, &context);
     }
     if (FAILED(hr)) {
         report("readback staging growth policy device initialization", false, failures);
         return;
     }
 
-    const auto exercise_order = [&](UINT first_width, UINT first_height,
-                                    UINT second_width, UINT second_height,
-                                    const char* label) {
+    const auto exercise_order = [&](UINT first_width, UINT first_height, UINT second_width,
+                                    UINT second_height, const char* label) {
         ArenaTexture arena;
         HRESULT case_hr = arena.initialize(device.Get());
         const auto read_shape = [&](UINT width, UINT height) -> bool {
@@ -395,7 +371,7 @@ void run_readback_staging_growth_policy_case(int& failures)
                 return false;
             }
             context->UpdateSubresource(texture.Get(), 0, nullptr, expected.data(),
-                width * static_cast<UINT>(sizeof(float)), 0);
+                                       width * static_cast<UINT>(sizeof(float)), 0);
 
             dxblas::gpuMemBase memory;
             memory.texture = texture;
@@ -421,8 +397,8 @@ void run_readback_staging_growth_policy_case(int& failures)
         passed = passed && read_shape(second_width, second_height);
         const UINT expected_width = second_width;
         const UINT expected_height = second_height;
-        const std::size_t current_area =
-            static_cast<std::size_t>(arena.readback_staging_width()) * arena.readback_staging_height();
+        const std::size_t current_area = static_cast<std::size_t>(arena.readback_staging_width()) *
+                                         arena.readback_staging_height();
         const std::size_t request_area = static_cast<std::size_t>(second_width) * second_height;
         const std::size_t prior_area = static_cast<std::size_t>(first_width) * first_height;
         passed = passed && arena.readback_staging_width() == expected_width &&
@@ -439,27 +415,27 @@ void run_readback_staging_growth_policy_case(int& failures)
     UINT width = 0;
     UINT height = 0;
     hr = dxblas::detail::readback_staging_dimensions(128, 32, 64, 64, width, height);
-    report("readback staging keeps bounded combined growth", SUCCEEDED(hr) &&
-        width == 128 && height == 64, failures);
+    report("readback staging keeps bounded combined growth",
+           SUCCEEDED(hr) && width == 128 && height == 64, failures);
     hr = dxblas::detail::readback_staging_dimensions(0, 0, wide, 1, width, height);
-    report("readback staging first allocation uses request dimensions", SUCCEEDED(hr) &&
-        width == wide && height == 1, failures);
+    report("readback staging first allocation uses request dimensions",
+           SUCCEEDED(hr) && width == wide && height == 1, failures);
     hr = dxblas::detail::readback_staging_dimensions(wide, 1, 0, wide, width, height);
     report("readback staging rejects zero-sized request", hr == E_INVALIDARG, failures);
 }
 
-void run_sync_format_sequence_case(dxblas::Context& context, int& failures)
-{
+void run_sync_format_sequence_case(dxblas::Context& context, int& failures) {
     const auto check_float_sum = [&](std::size_t count, std::uint32_t salt) {
         std::vector<float> a(count), b(count), actual(count), expected(count);
         fill_pattern(a, salt);
         fill_pattern(b, salt + 13);
-        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] + b[i];
-        const HRESULT hr = context.sum(DXGI_FORMAT_R32_FLOAT,
-            a.data(), b.data(), actual.data(), count);
+        for (std::size_t i = 0; i < count; ++i)
+            expected[i] = a[i] + b[i];
+        const HRESULT hr =
+            context.sum(DXGI_FORMAT_R32_FLOAT, a.data(), b.data(), actual.data(), count);
         if (FAILED(hr)) {
-            std::cerr << "  sync float sum count=" << count << " failed: HRESULT 0x"
-                      << std::hex << static_cast<unsigned long>(hr) << std::dec << '\n';
+            std::cerr << "  sync float sum count=" << count << " failed: HRESULT 0x" << std::hex
+                      << static_cast<unsigned long>(hr) << std::dec << '\n';
             return false;
         }
         const bool data_matches = bit_equal(actual, expected, count);
@@ -476,15 +452,15 @@ void run_sync_format_sequence_case(dxblas::Context& context, int& failures)
     // Keep byte sums in range so this test checks the format transition and
     // readback path, rather than relying on overflow conversion semantics.
     constexpr std::size_t byte_count = 255;
-    std::vector<std::uint8_t> byte_a(byte_count), byte_b(byte_count),
-        byte_actual(byte_count), byte_expected(byte_count);
+    std::vector<std::uint8_t> byte_a(byte_count), byte_b(byte_count), byte_actual(byte_count),
+        byte_expected(byte_count);
     for (std::size_t i = 0; i < byte_count; ++i) {
         byte_a[i] = static_cast<std::uint8_t>(i % 17u);
         byte_b[i] = static_cast<std::uint8_t>((i * 3u) % 19u);
         byte_expected[i] = static_cast<std::uint8_t>(byte_a[i] + byte_b[i]);
     }
-    HRESULT hr = context.sum(DXGI_FORMAT_R8_UINT, byte_a.data(), byte_b.data(),
-        byte_actual.data(), byte_count);
+    HRESULT hr = context.sum(DXGI_FORMAT_R8_UINT, byte_a.data(), byte_b.data(), byte_actual.data(),
+                             byte_count);
     bool byte_passed = SUCCEEDED(hr);
     if (FAILED(hr)) {
         std::cerr << "  sync uint8 sum failed: HRESULT 0x" << std::hex
@@ -502,8 +478,7 @@ void run_sync_format_sequence_case(dxblas::Context& context, int& failures)
     report("sync API float 5 -> float 4097 -> uint8 -> larger float", passed, failures);
 }
 
-void run_gpu_array_case(dxblas::Context& context, int& failures)
-{
+void run_gpu_array_case(dxblas::Context& context, int& failures) {
     constexpr std::size_t count = 257;
     std::vector<float> a(count), b(count), expected(count), actual(count);
     fill_pattern(a, 5);
@@ -512,7 +487,7 @@ void run_gpu_array_case(dxblas::Context& context, int& failures)
     dxblas::GpuArray gpu_a, gpu_b, gpu_sum, gpu_mul;
     HRESULT hr = context.upload_gpu(DXGI_FORMAT_R32_FLOAT, a.data(), count, gpu_a);
     bool passed = SUCCEEDED(hr) && gpu_a.size() == count &&
-        gpu_a.format() == DXGI_FORMAT_R32_FLOAT && static_cast<bool>(gpu_a);
+                  gpu_a.format() == DXGI_FORMAT_R32_FLOAT && static_cast<bool>(gpu_a);
     if (passed) {
         hr = context.upload_gpu(DXGI_FORMAT_R32_FLOAT, b.data(), count, gpu_b);
         passed = SUCCEEDED(hr) && gpu_b.size() == count && static_cast<bool>(gpu_b);
@@ -522,7 +497,8 @@ void run_gpu_array_case(dxblas::Context& context, int& failures)
         passed = SUCCEEDED(hr) && gpu_sum.size() == count && static_cast<bool>(gpu_sum);
     }
     if (passed) {
-        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] + b[i];
+        for (std::size_t i = 0; i < count; ++i)
+            expected[i] = a[i] + b[i];
         hr = context.readback_gpu(gpu_sum, actual.data(), count);
         passed = SUCCEEDED(hr) && bit_equal(actual, expected, count);
     }
@@ -531,15 +507,15 @@ void run_gpu_array_case(dxblas::Context& context, int& failures)
         passed = SUCCEEDED(hr) && gpu_mul.size() == count && static_cast<bool>(gpu_mul);
     }
     if (passed) {
-        for (std::size_t i = 0; i < count; ++i) expected[i] = a[i] * b[i];
+        for (std::size_t i = 0; i < count; ++i)
+            expected[i] = a[i] * b[i];
         hr = context.readback_gpu(gpu_mul, actual.data(), count);
         passed = SUCCEEDED(hr) && bit_equal(actual, expected, count);
     }
     report("GpuArray upload, sum/mul arithmetic, and readback", passed, failures);
 }
 
-void run_duplicate_source_batch_case(dxblas::Context& context, int& failures)
-{
+void run_duplicate_source_batch_case(dxblas::Context& context, int& failures) {
     constexpr std::size_t count = 4097;
     std::vector<float> expected(count), peer(count), actual_a(count), actual_b(count);
     fill_pattern(expected, 31);
@@ -561,8 +537,7 @@ void run_duplicate_source_batch_case(dxblas::Context& context, int& failures)
     report("copy_to_cpu_batch same source to distinct destinations", passed, failures);
 }
 
-void run_arena_grow_only_case(dxblas::Context& context, int& failures)
-{
+void run_arena_grow_only_case(dxblas::Context& context, int& failures) {
     dxblas::NativeD3D11 native{};
     HRESULT hr = dxblas::get_native_d3d11(context, native);
     if (FAILED(hr) || !native.device) {
@@ -573,17 +548,17 @@ void run_arena_grow_only_case(dxblas::Context& context, int& failures)
     dxblas::detail::ArenaTexture arena;
     hr = arena.initialize(native.device);
     bool passed = SUCCEEDED(hr);
-    if (passed) hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 257, 1);
-    passed = passed && SUCCEEDED(hr) && arena.capacity_width() == 512 &&
-             arena.capacity_height() == 1;
+    if (passed)
+        hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 257, 1);
+    passed =
+        passed && SUCCEEDED(hr) && arena.capacity_width() == 512 && arena.capacity_height() == 1;
 
     Microsoft::WRL::ComPtr<ID3D11Resource> resource_before;
     Microsoft::WRL::ComPtr<ID3D11Resource> resource_after;
     if (passed) {
         arena.input_a_srv()->GetResource(&resource_before);
         hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 1, 129);
-        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 &&
-                 arena.capacity_height() == 256;
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 && arena.capacity_height() == 256;
     }
     if (passed) {
         arena.input_a_srv()->GetResource(&resource_after);
@@ -595,8 +570,7 @@ void run_arena_grow_only_case(dxblas::Context& context, int& failures)
     if (passed) {
         arena.input_a_srv()->GetResource(&grown_resource);
         hr = arena.ensure(DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, 257, 1);
-        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 &&
-                 arena.capacity_height() == 256;
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 512 && arena.capacity_height() == 256;
     }
     if (passed) {
         arena.input_a_srv()->GetResource(&resource_after);
@@ -609,19 +583,16 @@ void run_arena_grow_only_case(dxblas::Context& context, int& failures)
     if (passed) {
         arena.input_a_srv()->GetResource(&before_format_change);
         hr = arena.ensure(DXGI_FORMAT_R32_SINT, DXGI_FORMAT_R32_FLOAT, 17, 9);
-        passed = SUCCEEDED(hr) && arena.capacity_width() == 32 &&
-                 arena.capacity_height() == 16;
+        passed = SUCCEEDED(hr) && arena.capacity_width() == 32 && arena.capacity_height() == 16;
     }
     if (passed) {
         arena.input_a_srv()->GetResource(&resource_after);
         passed = before_format_change.Get() != resource_after.Get();
     }
-    report("sync arena capacity grows monotonically and resets on format change",
-           passed, failures);
+    report("sync arena capacity grows monotonically and resets on format change", passed, failures);
 }
 
-void run_batch_size_case(dxblas::Context& context, int source_count, int& failures)
-{
+void run_batch_size_case(dxblas::Context& context, int source_count, int& failures) {
     constexpr std::size_t counts[] = {255, 4097, 32769};
     std::vector<float> expected[3];
     std::vector<float> peer[3];
@@ -651,9 +622,8 @@ void run_batch_size_case(dxblas::Context& context, int source_count, int& failur
             {&a[0], actual[0].data(), counts[0]},
             {&a[1], actual[1].data(), counts[1]},
         });
-        passed = SUCCEEDED(hr) &&
-            bit_equal(actual[0], expected[0], counts[0]) &&
-            bit_equal(actual[1], expected[1], counts[1]);
+        passed = SUCCEEDED(hr) && bit_equal(actual[0], expected[0], counts[0]) &&
+                 bit_equal(actual[1], expected[1], counts[1]);
         if (FAILED(hr))
             std::cerr << "  2-source batch readback failed: HRESULT 0x" << std::hex
                       << static_cast<unsigned long>(hr) << std::dec << '\n';
@@ -672,20 +642,19 @@ void run_batch_size_case(dxblas::Context& context, int source_count, int& failur
     }
 
     report(std::string("copy_to_cpu_batch with ") + std::to_string(source_count) +
-           " differently sized sources", passed, failures);
+               " differently sized sources",
+           passed, failures);
 }
 
-template<class T>
-void run_mixed_format_case(dxblas::Context& context, const char* type_name, int& failures)
-{
+template <class T>
+void run_mixed_format_case(dxblas::Context& context, const char* type_name, int& failures) {
     // This helper is intentionally called in float, int32, uint8, float order.
     run_size_case<T>(context, 4097, type_name, failures);
 }
 
 } // namespace
 
-int main()
-{
+int main() {
     // Request the D3D11 debug layer for this test run. If the SDK debug runtime
     // is unavailable, device creation may retry without it in the backend.
     dxblas::Context context(D3D_DRIVER_TYPE_HARDWARE, D3D11_CREATE_DEVICE_DEBUG);
@@ -722,7 +691,7 @@ int main()
     run_mixed_format_case<std::uint8_t>(context, "mixed uint8", failures);
     run_mixed_format_case<float>(context, "mixed float #2", failures);
 
-    std::cout << "\nCopy test summary: " << (failures == 0 ? "PASS" : "FAIL")
-              << " (" << failures << " failed case(s))\n";
+    std::cout << "\nCopy test summary: " << (failures == 0 ? "PASS" : "FAIL") << " (" << failures
+              << " failed case(s))\n";
     return failures == 0 ? 0 : 1;
 }

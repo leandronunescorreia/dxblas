@@ -12,9 +12,11 @@ namespace dxblas {
 // ArenaTexture. The texture is owned by the memory object; ArenaTexture only
 // creates/uploads/reads it and does not maintain a separate texture-resource wrapper.
 class gpuMemBase {
-public:
+  public:
     virtual ~gpuMemBase() = default;
-    virtual const void* cpu_data() const noexcept { return nullptr; }
+    virtual const void* cpu_data() const noexcept {
+        return nullptr;
+    }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;

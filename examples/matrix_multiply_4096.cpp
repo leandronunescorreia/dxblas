@@ -12,12 +12,12 @@
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
-static double milliseconds(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
+static double milliseconds(Clock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+}
 
-static void cpu_matrix_multiply_blocked(const std::vector<float>& a,
-                                        const std::vector<float>& b,
-                                        std::vector<float>& c, std::size_t n)
-{
+static void cpu_matrix_multiply_blocked(const std::vector<float>& a, const std::vector<float>& b,
+                                        std::vector<float>& c, std::size_t n) {
     std::fill(c.begin(), c.end(), 0.0f);
     constexpr std::size_t block = 32;
     for (std::size_t ii = 0; ii < n; ii += block)
@@ -31,13 +31,16 @@ static void cpu_matrix_multiply_blocked(const std::vector<float>& a,
                     }
 }
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     int total = 2048;
     std::size_t n = total;
     if (argc > 1) {
-        try { n = static_cast<std::size_t>(std::stoull(argv[1])); }
-        catch (...) { std::cerr << "Usage: dxblas_matrix_multiply_4096 [matrix-size]\n"; return 2; }
+        try {
+            n = static_cast<std::size_t>(std::stoull(argv[1]));
+        } catch (...) {
+            std::cerr << "Usage: dxblas_matrix_multiply_4096 [matrix-size]\n";
+            return 2;
+        }
     }
     if (n == 0 || n > total) {
         std::cerr << "Matrix size must be in [1, " << total << "].\n";
@@ -48,11 +51,14 @@ int main(int argc, char** argv)
     std::vector<float> a(elements), b(elements), cpu_result(elements), gpu_result(elements);
     std::mt19937 rng(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (std::size_t i = 0; i < elements; ++i) { a[i] = dist(rng); b[i] = dist(rng); }
+    for (std::size_t i = 0; i < elements; ++i) {
+        a[i] = dist(rng);
+        b[i] = dist(rng);
+    }
 
     std::cout << "dxblas_matrix_multiply_4096: gpuMem resident GEMM vs blocked C++\n"
-              << "Matrix: " << n << " x " << n << ", each input: "
-              << (elements * sizeof(float) / (1024.0 * 1024.0)) << " MiB\n"
+              << "Matrix: " << n << " x " << n
+              << ", each input: " << (elements * sizeof(float) / (1024.0 * 1024.0)) << " MiB\n"
               << "GPU path: D3D11 pixel shader + render target; no compute shader\n";
 
     const auto cpu_start = Clock::now();
@@ -102,7 +108,9 @@ int main(int argc, char** argv)
         const std::size_t index = elements <= checks ? i : i * elements / checks;
         const float error = std::fabs(cpu_result[index] - gpu_result[index]);
         max_error = std::max(max_error, error);
-        if (!std::isfinite(gpu_result[index]) || error > 2.0e-3f + 2.0e-4f * std::fabs(cpu_result[index])) ++mismatches;
+        if (!std::isfinite(gpu_result[index]) ||
+            error > 2.0e-3f + 2.0e-4f * std::fabs(cpu_result[index]))
+            ++mismatches;
     }
     std::cout << "CPU -> GPU: " << milliseconds(upload_end - upload_start) << " ms\n"
               << "GPU-resident GEMM: " << milliseconds(gpu_compute_end - gpu_start) << " ms\n"

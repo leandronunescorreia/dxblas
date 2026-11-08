@@ -103,8 +103,7 @@ float main(PSInput input) : SV_Target
 }
 )";
 
-const char* get_dtype_string(DXGI_FORMAT format)
-{
+const char* get_dtype_string(DXGI_FORMAT format) {
     switch (format) {
     case DXGI_FORMAT_R8_UINT:
     case DXGI_FORMAT_R16_UINT:
@@ -122,8 +121,7 @@ const char* get_dtype_string(DXGI_FORMAT format)
     }
 }
 
-std::string load_shader_source(BinaryOp op, const char*& source_name)
-{
+std::string load_shader_source(BinaryOp op, const char*& source_name) {
     const char* filename = nullptr;
     const char* fallback_source = nullptr;
 
@@ -169,14 +167,9 @@ std::string load_shader_source(BinaryOp op, const char*& source_name)
     return fallback_source ? std::string(fallback_source) : std::string{};
 }
 
-HRESULT compile_shader(
-    const std::string& source,
-    const char* source_name,
-    const D3D_SHADER_MACRO* defines,
-    const char* profile,
-    Microsoft::WRL::ComPtr<ID3DBlob>& bytecode,
-    std::string& last_error)
-{
+HRESULT compile_shader(const std::string& source, const char* source_name,
+                       const D3D_SHADER_MACRO* defines, const char* profile,
+                       Microsoft::WRL::ComPtr<ID3DBlob>& bytecode, std::string& last_error) {
     UINT compile_flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #if defined(_DEBUG) || defined(DEBUG)
     compile_flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
@@ -185,24 +178,14 @@ HRESULT compile_shader(
 #endif
 
     Microsoft::WRL::ComPtr<ID3DBlob> errors;
-    HRESULT hr = D3DCompile(
-        source.c_str(),
-        source.size(),
-        source_name,
-        defines,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "main",
-        profile,
-        compile_flags,
-        0,
-        &bytecode,
-        &errors);
+    HRESULT hr = D3DCompile(source.c_str(), source.size(), source_name, defines,
+                            D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", profile, compile_flags, 0,
+                            &bytecode, &errors);
 
     if (FAILED(hr)) {
         if (errors) {
-            last_error.assign(
-                static_cast<const char*>(errors->GetBufferPointer()),
-                errors->GetBufferSize());
+            last_error.assign(static_cast<const char*>(errors->GetBufferPointer()),
+                              errors->GetBufferSize());
             OutputDebugStringA(last_error.c_str());
         } else {
             last_error = "D3DCompile failed without error blob.";
@@ -214,12 +197,8 @@ HRESULT compile_shader(
 
 } // namespace
 
-HRESULT D3D11ShaderManager::get_or_compile(
-    ID3D11Device* device,
-    BinaryOp op,
-    DXGI_FORMAT format,
-    Microsoft::WRL::ComPtr<ID3D11PixelShader>& out_shader)
-{
+HRESULT D3D11ShaderManager::get_or_compile(ID3D11Device* device, BinaryOp op, DXGI_FORMAT format,
+                                           Microsoft::WRL::ComPtr<ID3D11PixelShader>& out_shader) {
     if (!device)
         return E_POINTER;
 
@@ -243,11 +222,9 @@ HRESULT D3D11ShaderManager::get_or_compile(
         return E_FAIL;
     }
 
-    const bool unsigned_integer = format == DXGI_FORMAT_R8_UINT ||
-                                  format == DXGI_FORMAT_R16_UINT ||
+    const bool unsigned_integer = format == DXGI_FORMAT_R8_UINT || format == DXGI_FORMAT_R16_UINT ||
                                   format == DXGI_FORMAT_R32_UINT;
-    const bool signed_integer = format == DXGI_FORMAT_R8_SINT ||
-                                format == DXGI_FORMAT_R16_SINT ||
+    const bool signed_integer = format == DXGI_FORMAT_R8_SINT || format == DXGI_FORMAT_R16_SINT ||
                                 format == DXGI_FORMAT_R32_SINT;
 
     D3D_SHADER_MACRO defines[3]{};
@@ -258,16 +235,12 @@ HRESULT D3D11ShaderManager::get_or_compile(
         defines[1] = {"SIGNED_INTEGER_OUTPUT", "1"};
 
     Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-    HRESULT hr = compile_shader(
-        shader_code, source_name, defines, "ps_5_0", bytecode, last_error_);
+    HRESULT hr = compile_shader(shader_code, source_name, defines, "ps_5_0", bytecode, last_error_);
     if (FAILED(hr))
         return hr;
 
-    hr = device->CreatePixelShader(
-        bytecode->GetBufferPointer(),
-        bytecode->GetBufferSize(),
-        nullptr,
-        &out_shader);
+    hr = device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr,
+                                   &out_shader);
 
     if (FAILED(hr)) {
         last_error_ = "CreatePixelShader failed with HRESULT: " + std::to_string(hr);
@@ -279,10 +252,8 @@ HRESULT D3D11ShaderManager::get_or_compile(
 }
 
 HRESULT D3D11ShaderManager::get_or_compile_fullscreen_vertex_shader(
-    ID3D11Device* device,
-    Microsoft::WRL::ComPtr<ID3D11VertexShader>& out_shader,
-    Microsoft::WRL::ComPtr<ID3DBlob>& out_bytecode)
-{
+    ID3D11Device* device, Microsoft::WRL::ComPtr<ID3D11VertexShader>& out_shader,
+    Microsoft::WRL::ComPtr<ID3DBlob>& out_bytecode) {
     if (!device)
         return E_POINTER;
 
@@ -293,21 +264,13 @@ HRESULT D3D11ShaderManager::get_or_compile_fullscreen_vertex_shader(
     }
 
     Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-    HRESULT hr = compile_shader(
-        kFullscreenVertexShaderSource,
-        "fullscreen_triangle.hlsl",
-        nullptr,
-        "vs_5_0",
-        bytecode,
-        last_error_);
+    HRESULT hr = compile_shader(kFullscreenVertexShaderSource, "fullscreen_triangle.hlsl", nullptr,
+                                "vs_5_0", bytecode, last_error_);
     if (FAILED(hr))
         return hr;
 
-    hr = device->CreateVertexShader(
-        bytecode->GetBufferPointer(),
-        bytecode->GetBufferSize(),
-        nullptr,
-        &fullscreen_vertex_shader_);
+    hr = device->CreateVertexShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+                                    nullptr, &fullscreen_vertex_shader_);
     if (FAILED(hr)) {
         last_error_ = "CreateVertexShader failed with HRESULT: " + std::to_string(hr);
         return hr;
@@ -319,8 +282,7 @@ HRESULT D3D11ShaderManager::get_or_compile_fullscreen_vertex_shader(
     return S_OK;
 }
 
-void D3D11ShaderManager::clear() noexcept
-{
+void D3D11ShaderManager::clear() noexcept {
     pixel_cache_.clear();
     fullscreen_vertex_shader_.Reset();
     fullscreen_vertex_bytecode_.Reset();

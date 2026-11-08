@@ -52,34 +52,33 @@ namespace {
 // ---------------------------------------------------------------- options --
 
 struct Options {
-    int iterations = 0;          // 0 = adaptive
-    int warmup = 0;              // 0 = adaptive
-    bool large = false;          // also run the 256 Mi-element case
-    std::string type = "all";    // float32 | int32 | int16 | uint8 | all
+    int iterations = 0;       // 0 = adaptive
+    int warmup = 0;           // 0 = adaptive
+    bool large = false;       // also run the 256 Mi-element case
+    std::string type = "all"; // float32 | int32 | int16 | uint8 | all
     std::string csv_path;
 };
 
-void print_usage()
-{
-    std::cout
-        << "Usage: dxblas_gpumem_roundtrip [options]\n"
-        << "  --iterations N   measured iterations per case (default: adaptive, 7..200)\n"
-        << "  --warmup N       discarded warm-up iterations (default: adaptive, 2..10)\n"
-        << "  --type T         float32 | int32 | int16 | uint8 | all (default: all)\n"
-        << "  --large          also run 67,108,864 elements (needs roughly 1-2.5 GiB)\n"
-        << "  --csv FILE       write per-iteration raw samples to FILE\n"
-        << "  --help           show this text\n";
+void print_usage() {
+    std::cout << "Usage: dxblas_gpumem_roundtrip [options]\n"
+              << "  --iterations N   measured iterations per case (default: adaptive, 7..200)\n"
+              << "  --warmup N       discarded warm-up iterations (default: adaptive, 2..10)\n"
+              << "  --type T         float32 | int32 | int16 | uint8 | all (default: all)\n"
+              << "  --large          also run 67,108,864 elements (needs roughly 1-2.5 GiB)\n"
+              << "  --csv FILE       write per-iteration raw samples to FILE\n"
+              << "  --help           show this text\n";
 }
 
-bool parse_options(int argc, char** argv, Options& options)
-{
+bool parse_options(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const auto next_int = [&](int& out) {
-            if (i + 1 >= argc) return false;
+            if (i + 1 >= argc)
+                return false;
             try {
                 const int value = std::stoi(argv[++i]);
-                if (value <= 0) return false;
+                if (value <= 0)
+                    return false;
                 out = value;
                 return true;
             } catch (...) {
@@ -87,20 +86,23 @@ bool parse_options(int argc, char** argv, Options& options)
             }
         };
         if (arg == "--iterations") {
-            if (!next_int(options.iterations)) return false;
+            if (!next_int(options.iterations))
+                return false;
         } else if (arg == "--warmup") {
-            if (!next_int(options.warmup)) return false;
+            if (!next_int(options.warmup))
+                return false;
         } else if (arg == "--type") {
-            if (i + 1 >= argc) return false;
+            if (i + 1 >= argc)
+                return false;
             options.type = argv[++i];
-            if (options.type != "all" && options.type != "float32" &&
-                options.type != "int32" && options.type != "int16" &&
-                options.type != "uint8")
+            if (options.type != "all" && options.type != "float32" && options.type != "int32" &&
+                options.type != "int16" && options.type != "uint8")
                 return false;
         } else if (arg == "--large") {
             options.large = true;
         } else if (arg == "--csv") {
-            if (i + 1 >= argc) return false;
+            if (i + 1 >= argc)
+                return false;
             options.csv_path = argv[++i];
         } else {
             return false;
@@ -118,101 +120,104 @@ struct Stats {
     double cv_percent = std::numeric_limits<double>::quiet_NaN();
 };
 
-Stats compute_stats(std::vector<double> values)
-{
+Stats compute_stats(std::vector<double> values) {
     Stats s;
-    if (values.empty()) return s;
+    if (values.empty())
+        return s;
     std::sort(values.begin(), values.end());
     const std::size_t n = values.size();
     s.min = values.front();
     s.median = (n % 2 != 0) ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
     double sum = 0.0;
-    for (const double v : values) sum += v;
+    for (const double v : values)
+        sum += v;
     s.mean = sum / static_cast<double>(n);
     double variance = 0.0;
-    for (const double v : values) variance += (v - s.mean) * (v - s.mean);
+    for (const double v : values)
+        variance += (v - s.mean) * (v - s.mean);
     variance = n > 1 ? variance / static_cast<double>(n - 1) : 0.0;
     s.cv_percent = s.mean > 0.0 ? 100.0 * std::sqrt(variance) / s.mean : 0.0;
     return s;
 }
 
-double ms_between(Clock::time_point a, Clock::time_point b)
-{
+double ms_between(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
-double gb_per_s(std::size_t bytes, double ms)
-{
-    if (!(ms > 0.0)) return std::numeric_limits<double>::quiet_NaN();
+double gb_per_s(std::size_t bytes, double ms) {
+    if (!(ms > 0.0))
+        return std::numeric_limits<double>::quiet_NaN();
     return static_cast<double>(bytes) / (ms * 1.0e6);
 }
 
-std::string human_bytes(std::size_t bytes)
-{
+std::string human_bytes(std::size_t bytes) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(2);
-    if (bytes >= (1u << 20)) out << static_cast<double>(bytes) / (1 << 20) << " MiB";
-    else if (bytes >= (1u << 10)) out << static_cast<double>(bytes) / (1 << 10) << " KiB";
-    else out << bytes << " B";
+    if (bytes >= (1u << 20))
+        out << static_cast<double>(bytes) / (1 << 20) << " MiB";
+    else if (bytes >= (1u << 10))
+        out << static_cast<double>(bytes) / (1 << 10) << " KiB";
+    else
+        out << bytes << " B";
     return out.str();
 }
 
 // ---------------------------------------------------------------- helpers --
 
-void print_hresult(const std::string& operation, HRESULT hr)
-{
-    std::cerr << operation << " failed: HRESULT 0x" << std::hex
-              << static_cast<unsigned long>(hr) << std::dec << '\n';
+void print_hresult(const std::string& operation, HRESULT hr) {
+    std::cerr << operation << " failed: HRESULT 0x" << std::hex << static_cast<unsigned long>(hr)
+              << std::dec << '\n';
 }
 
 // Waits until every command submitted so far has finished on the GPU.
 class GpuFence {
-public:
-    HRESULT initialize(ID3D11Device* device, ID3D11DeviceContext* context)
-    {
-        if (!device || !context) return E_INVALIDARG;
+  public:
+    HRESULT initialize(ID3D11Device* device, ID3D11DeviceContext* context) {
+        if (!device || !context)
+            return E_INVALIDARG;
         D3D11_QUERY_DESC desc{};
         desc.Query = D3D11_QUERY_EVENT;
         context_ = context;
         return device->CreateQuery(&desc, &query_);
     }
 
-    HRESULT wait()
-    {
-        if (!context_ || !query_) return E_UNEXPECTED;
+    HRESULT wait() {
+        if (!context_ || !query_)
+            return E_UNEXPECTED;
         context_->End(query_.Get());
         context_->Flush();
         for (;;) {
             BOOL done = FALSE;
             const HRESULT hr = context_->GetData(query_.Get(), &done, sizeof(done), 0);
-            if (FAILED(hr)) return hr;
-            if (hr == S_OK && done) return S_OK;
+            if (FAILED(hr))
+                return hr;
+            if (hr == S_OK && done)
+                return S_OK;
             std::this_thread::yield();
         }
     }
 
-private:
+  private:
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<ID3D11Query> query_;
 };
 
-std::uint32_t mix(std::uint32_t x)
-{
-    x ^= x >> 16; x *= 0x7feb352du;
-    x ^= x >> 15; x *= 0x846ca68bu;
+std::uint32_t mix(std::uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
     x ^= x >> 16;
     return x;
 }
 
 // Deterministic, cheap, reproducible data (no RNG state to carry around).
-template<class T>
-void fill_pattern(std::vector<T>& values, std::uint32_t salt)
-{
+template <class T> void fill_pattern(std::vector<T>& values, std::uint32_t salt) {
     for (std::size_t i = 0; i < values.size(); ++i) {
         const std::uint32_t h = mix(static_cast<std::uint32_t>(i) + salt * 0x9E3779B9u);
         if constexpr (std::is_floating_point_v<T>) {
-            values[i] = static_cast<T>(static_cast<float>(h >> 8) *
-                                       (1.0f / 16777216.0f) * 2000.0f - 1000.0f);
+            values[i] = static_cast<T>(static_cast<float>(h >> 8) * (1.0f / 16777216.0f) * 2000.0f -
+                                       1000.0f);
         } else {
             values[i] = static_cast<T>(h);
         }
@@ -220,11 +225,11 @@ void fill_pattern(std::vector<T>& values, std::uint32_t salt)
 }
 
 // Returns the first mismatching index, or count when identical (bit-exact).
-template<class T>
-std::size_t first_mismatch(const std::vector<T>& actual, const std::vector<T>& expected)
-{
+template <class T>
+std::size_t first_mismatch(const std::vector<T>& actual, const std::vector<T>& expected) {
     for (std::size_t i = 0; i < expected.size(); ++i)
-        if (std::memcmp(&actual[i], &expected[i], sizeof(T)) != 0) return i;
+        if (std::memcmp(&actual[i], &expected[i], sizeof(T)) != 0)
+            return i;
     return expected.size();
 }
 
@@ -232,33 +237,34 @@ std::size_t first_mismatch(const std::vector<T>& actual, const std::vector<T>& e
 
 struct Sample {
     double submit_ms = 0.0;
-    double complete_ms = 0.0;   // includes submit
+    double complete_ms = 0.0; // includes submit
     double readback_ms = 0.0;
 };
 
 struct CsvWriter {
     std::ofstream file;
-    bool enabled() const { return file.is_open(); }
+    bool enabled() const {
+        return file.is_open();
+    }
 };
 
-int pick_iterations(const Options& options, std::size_t bytes_per_input)
-{
-    if (options.iterations > 0) return options.iterations;
-    constexpr std::size_t target_traffic = 256u << 20;   // bytes moved per case
+int pick_iterations(const Options& options, std::size_t bytes_per_input) {
+    if (options.iterations > 0)
+        return options.iterations;
+    constexpr std::size_t target_traffic = 256u << 20; // bytes moved per case
     const std::size_t traffic = std::max<std::size_t>(bytes_per_input * 4, 1);
     return static_cast<int>(std::clamp<std::size_t>(target_traffic / traffic, 7, 200));
 }
 
-int pick_warmup(const Options& options, int iterations)
-{
-    if (options.warmup > 0) return options.warmup;
+int pick_warmup(const Options& options, int iterations) {
+    if (options.warmup > 0)
+        return options.warmup;
     return std::clamp(iterations / 5, 2, 10);
 }
 
-template<class T>
-bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
-              std::size_t count, const Options& options, CsvWriter& csv, bool& failed)
-{
+template <class T>
+bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name, std::size_t count,
+              const Options& options, CsvWriter& csv, bool& failed) {
     const std::size_t bytes = count * sizeof(T);
     const int iterations = pick_iterations(options, bytes);
     const int warmup = pick_warmup(options, iterations);
@@ -280,17 +286,20 @@ bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
         const auto t0 = Clock::now();
         HRESULT hr = context.copy(a, b, out, count);
         const auto t1 = Clock::now();
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr))
+            return hr;
         hr = fence.wait();
         const auto t2 = Clock::now();
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr))
+            return hr;
 
         hr = context.copy_to_cpu_batch({
             {&a, back_a.data(), count},
             {&b, back_b.data(), count},
         });
         const auto t3 = Clock::now();
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr))
+            return hr;
 
         sample.submit_ms = ms_between(t0, t1);
         sample.complete_ms = ms_between(t0, t2);
@@ -301,7 +310,8 @@ bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
     const auto validate = [&](const char* when) -> bool {
         const std::size_t bad_a = first_mismatch(back_a, cpu_a);
         const std::size_t bad_b = first_mismatch(back_b, cpu_b);
-        if (bad_a == count && bad_b == count) return true;
+        if (bad_a == count && bad_b == count)
+            return true;
         std::cerr << type_name << " count=" << count << " (" << when << "): MISMATCH in "
                   << (bad_a != count ? "A" : "B") << " at element "
                   << (bad_a != count ? bad_a : bad_b) << '\n';
@@ -313,22 +323,39 @@ bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
     // Cold sample (single, validated, never averaged).
     Sample cold;
     HRESULT hr = run_once(cold);
-    if (FAILED(hr)) { print_hresult(label + " cold run", hr); failed = true; return false; }
-    if (!validate("cold")) { failed = true; return false; }
+    if (FAILED(hr)) {
+        print_hresult(label + " cold run", hr);
+        failed = true;
+        return false;
+    }
+    if (!validate("cold")) {
+        failed = true;
+        return false;
+    }
 
     for (int i = 0; i < warmup; ++i) {
         Sample discard;
         hr = run_once(discard);
-        if (FAILED(hr)) { print_hresult(label + " warm-up", hr); failed = true; return false; }
+        if (FAILED(hr)) {
+            print_hresult(label + " warm-up", hr);
+            failed = true;
+            return false;
+        }
     }
 
     std::vector<double> submit, complete, readback, roundtrip;
-    submit.reserve(iterations); complete.reserve(iterations);
-    readback.reserve(iterations); roundtrip.reserve(iterations);
+    submit.reserve(iterations);
+    complete.reserve(iterations);
+    readback.reserve(iterations);
+    roundtrip.reserve(iterations);
     for (int i = 0; i < iterations; ++i) {
         Sample s;
         hr = run_once(s);
-        if (FAILED(hr)) { print_hresult(label + " measured run", hr); failed = true; return false; }
+        if (FAILED(hr)) {
+            print_hresult(label + " measured run", hr);
+            failed = true;
+            return false;
+        }
         submit.push_back(s.submit_ms);
         complete.push_back(s.complete_ms);
         readback.push_back(s.readback_ms);
@@ -338,10 +365,13 @@ bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
                      << s.submit_ms << ',' << s.complete_ms << ',' << s.readback_ms << '\n';
         }
     }
-    if (!validate("last iteration")) { failed = true; return false; }
+    if (!validate("last iteration")) {
+        failed = true;
+        return false;
+    }
     if (csv.enabled()) {
-        csv.file << type_name << ',' << count << ',' << bytes << ",cold,0,"
-                 << cold.submit_ms << ',' << cold.complete_ms << ',' << cold.readback_ms << '\n';
+        csv.file << type_name << ',' << count << ',' << bytes << ",cold,0," << cold.submit_ms << ','
+                 << cold.complete_ms << ',' << cold.readback_ms << '\n';
     }
 
     const Stats st_submit = compute_stats(submit);
@@ -349,55 +379,38 @@ bool run_case(dxblas::Context& context, GpuFence& fence, const char* type_name,
     const Stats st_readback = compute_stats(readback);
     const Stats st_roundtrip = compute_stats(roundtrip);
 
-    const std::size_t moved = bytes * 2;   // two inputs each way
-    std::cout << std::fixed << std::setprecision(3)
-              << std::right << std::setw(12) << count
-              << std::setw(11) << human_bytes(bytes)
-              << std::setw(5) << iterations
-              << std::setw(10) << cold.complete_ms
-              << std::setw(10) << st_submit.median
-              << std::setw(10) << st_complete.median
-              << std::setw(10) << st_complete.min
-              << std::setw(8) << std::setprecision(2) << gb_per_s(moved, st_complete.median)
-              << std::setprecision(3)
-              << std::setw(10) << st_readback.median
-              << std::setw(10) << st_readback.min
+    const std::size_t moved = bytes * 2; // two inputs each way
+    std::cout << std::fixed << std::setprecision(3) << std::right << std::setw(12) << count
+              << std::setw(11) << human_bytes(bytes) << std::setw(5) << iterations << std::setw(10)
+              << cold.complete_ms << std::setw(10) << st_submit.median << std::setw(10)
+              << st_complete.median << std::setw(10) << st_complete.min << std::setw(8)
+              << std::setprecision(2) << gb_per_s(moved, st_complete.median) << std::setprecision(3)
+              << std::setw(10) << st_readback.median << std::setw(10) << st_readback.min
               << std::setw(8) << std::setprecision(2) << gb_per_s(moved, st_readback.median)
-              << std::setprecision(3)
-              << std::setw(10) << st_roundtrip.median
-              << std::setprecision(1)
-              << std::setw(7) << st_complete.cv_percent
-              << std::setw(7) << st_readback.cv_percent << '\n';
+              << std::setprecision(3) << std::setw(10) << st_roundtrip.median
+              << std::setprecision(1) << std::setw(7) << st_complete.cv_percent << std::setw(7)
+              << st_readback.cv_percent << '\n';
     return true;
 }
 
-template<class T>
+template <class T>
 bool run_type(dxblas::Context& context, GpuFence& fence, const char* type_name,
-              const Options& options, CsvWriter& csv)
-{
+              const Options& options, CsvWriter& csv) {
     std::cout << "\n=== " << type_name << " (" << sizeof(T) << " byte elements) ===\n"
-              << std::right << std::setw(12) << "elements"
-              << std::setw(11) << "bytes/in"
-              << std::setw(5) << "n"
-              << std::setw(10) << "cold ms"
-              << std::setw(10) << "submit"
-              << std::setw(10) << "up med"
-              << std::setw(10) << "up min"
-              << std::setw(8) << "up GB/s"
-              << std::setw(10) << "rb med"
-              << std::setw(10) << "rb min"
-              << std::setw(8) << "rb GB/s"
-              << std::setw(10) << "trip med"
-              << std::setw(7) << "upCV%"
-              << std::setw(7) << "rbCV%" << '\n'
+              << std::right << std::setw(12) << "elements" << std::setw(11) << "bytes/in"
+              << std::setw(5) << "n" << std::setw(10) << "cold ms" << std::setw(10) << "submit"
+              << std::setw(10) << "up med" << std::setw(10) << "up min" << std::setw(8) << "up GB/s"
+              << std::setw(10) << "rb med" << std::setw(10) << "rb min" << std::setw(8) << "rb GB/s"
+              << std::setw(10) << "trip med" << std::setw(7) << "upCV%" << std::setw(7) << "rbCV%"
+              << '\n'
               << std::string(138, '-') << '\n';
 
     // Sizes cover: tiny, a partial single row, row boundaries (16384 is the texture
     // row width), partial last rows, and sizes from 1 MiB-ish to 64 MiB (float).
-    std::vector<std::size_t> sizes = {
-        1, 5, 255, 4096, 4097, 16384, 16385, 65536, 262144,
-        1'000'003, 4'194'304, 16'777'216};
-    if (options.large) sizes.push_back(67'108'864);
+    std::vector<std::size_t> sizes = {1,     5,     255,    4096,      4097,      16384,
+                                      16385, 65536, 262144, 1'000'003, 4'194'304, 16'777'216};
+    if (options.large)
+        sizes.push_back(67'108'864);
 
     bool failed = false;
     for (const std::size_t count : sizes) {
@@ -409,8 +422,7 @@ bool run_type(dxblas::Context& context, GpuFence& fence, const char* type_name,
 
 } // namespace
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     Options options;
     if (!parse_options(argc, argv, options)) {
         print_usage();
@@ -433,7 +445,7 @@ int main(int argc, char** argv)
     }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> immediate;
-    device.Attach(native.device);        // get_native_d3d11 returns AddRef'd pointers
+    device.Attach(native.device); // get_native_d3d11 returns AddRef'd pointers
     immediate.Attach(native.context);
 
     GpuFence fence;
@@ -466,24 +478,30 @@ int main(int argc, char** argv)
                     "upload_submit_ms,upload_complete_ms,readback_ms\n";
     }
 
-    std::cout << "dxblas_gpumem_roundtrip\n"
-              << "Adapter: " << adapter << '\n'
-              << "Phases: submit = Context::copy returns; up = copy + GPU completion (EVENT query);\n"
-              << "        rb = copy_to_cpu_batch of both inputs with the GPU idle; trip = up + rb.\n"
-              << "Throughput counts both inputs (2 x bytes/in), decimal GB/s, from the median.\n"
-              << "cold = first copy on fresh gpuMem objects (includes texture creation); all times in ms.\n"
-              << "CV% = coefficient of variation; values above ~10% mean the numbers are noisy.\n"
-              << "Iterations per case are adaptive unless --iterations is given; every run is\n"
-              << "validated bit-exactly on the cold run and on the last measured iteration.\n";
+    std::cout
+        << "dxblas_gpumem_roundtrip\n"
+        << "Adapter: " << adapter << '\n'
+        << "Phases: submit = Context::copy returns; up = copy + GPU completion (EVENT query);\n"
+        << "        rb = copy_to_cpu_batch of both inputs with the GPU idle; trip = up + rb.\n"
+        << "Throughput counts both inputs (2 x bytes/in), decimal GB/s, from the median.\n"
+        << "cold = first copy on fresh gpuMem objects (includes texture creation); all times in "
+           "ms.\n"
+        << "CV% = coefficient of variation; values above ~10% mean the numbers are noisy.\n"
+        << "Iterations per case are adaptive unless --iterations is given; every run is\n"
+        << "validated bit-exactly on the cold run and on the last measured iteration.\n";
 
     bool ok = true;
     const auto wants = [&](const char* name) {
         return options.type == "all" || options.type == name;
     };
-    if (ok && wants("float32")) ok = run_type<float>(context, fence, "float32", options, csv);
-    if (ok && wants("int32"))   ok = run_type<std::int32_t>(context, fence, "int32", options, csv);
-    if (ok && wants("int16"))   ok = run_type<std::int16_t>(context, fence, "int16", options, csv);
-    if (ok && wants("uint8"))   ok = run_type<std::uint8_t>(context, fence, "uint8", options, csv);
+    if (ok && wants("float32"))
+        ok = run_type<float>(context, fence, "float32", options, csv);
+    if (ok && wants("int32"))
+        ok = run_type<std::int32_t>(context, fence, "int32", options, csv);
+    if (ok && wants("int16"))
+        ok = run_type<std::int16_t>(context, fence, "int16", options, csv);
+    if (ok && wants("uint8"))
+        ok = run_type<std::uint8_t>(context, fence, "uint8", options, csv);
 
     std::cout << (ok ? "\nAll GPU memory roundtrip scenarios passed.\n"
                      : "\nRoundtrip FAILED (see messages above).\n");
