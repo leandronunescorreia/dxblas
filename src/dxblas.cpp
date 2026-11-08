@@ -7,65 +7,115 @@
 namespace dxblas {
 
 Context::Context(D3D_DRIVER_TYPE driver_type, UINT device_flags)
-    : backend_(std::make_unique<detail::D3D11Backend>(driver_type, device_flags))
-{
+    : backend_(std::make_unique<detail::D3D11Backend>(driver_type, device_flags)) {
 }
 
-Context::Context(std::unique_ptr<IBackend> backend)
-    : backend_(std::move(backend))
-{
+Context::Context(std::unique_ptr<IBackend> backend) : backend_(std::move(backend)) {
 }
 
 Context::~Context() = default;
 Context::Context(Context&&) noexcept = default;
 Context& Context::operator=(Context&&) noexcept = default;
 
-HRESULT Context::initialize()
-{
+HRESULT Context::initialize() {
     return backend_ ? backend_->initialize() : E_POINTER;
 }
 
-HRESULT Context::sum(
-    DXGI_FORMAT format,
-    const void* a,
-    const void* b,
-    void* out,
-    std::size_t count)
-{
+HRESULT Context::sum(DXGI_FORMAT format, const void* a, const void* b, void* out,
+                     std::size_t count) {
     return backend_ ? backend_->sum(format, a, b, out, count) : E_POINTER;
 }
 
-HRESULT Context::mul(
-    DXGI_FORMAT format,
-    const void* a,
-    const void* b,
-    void* out,
-    std::size_t count)
-{
+HRESULT Context::mul(DXGI_FORMAT format, const void* a, const void* b, void* out,
+                     std::size_t count) {
     return backend_ ? backend_->mul(format, a, b, out, count) : E_POINTER;
 }
 
-IBackend* Context::backend() noexcept
-{
+HRESULT Context::gemm(const float* a, const float* b, float* c, std::size_t m, std::size_t n,
+                      std::size_t k) {
+    return backend_ ? backend_->gemm(a, b, c, m, n, k) : E_POINTER;
+}
+
+HRESULT Context::transpose(const float* a, float* out, std::size_t rows, std::size_t cols) {
+    return backend_ ? backend_->transpose(a, out, rows, cols) : E_POINTER;
+}
+
+HRESULT Context::add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                            std::size_t cols) {
+    return backend_ ? backend_->add_vector(matrix, vector, out, rows, cols) : E_POINTER;
+}
+
+HRESULT Context::gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                     std::size_t m, std::size_t n, std::size_t k) {
+    return backend_ ? backend_->gemm_transpose_bias(a, b, c, out, m, n, k) : E_POINTER;
+}
+
+HRESULT Context::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count,
+                            GpuArray& out) {
+    if (!backend_)
+        return E_POINTER;
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->upload_gpu(format, data, count, resource);
+    if (SUCCEEDED(hr))
+        out = GpuArray(std::move(resource), count, format);
+    return hr;
+}
+
+HRESULT Context::sum_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out) {
+    if (!backend_)
+        return E_POINTER;
+    if (!a || !b || a.count_ != b.count_ || a.format_ != b.format_)
+        return E_INVALIDARG;
+    const bool output_aliases_input =
+        out.resource_ && (out.resource_ == a.resource_ || out.resource_ == b.resource_);
+    if (!output_aliases_input)
+        out = GpuArray{}; // release its old arena slot for reuse
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->sum_gpu(a.resource_, b.resource_, a.count_, resource);
+    if (SUCCEEDED(hr))
+        out = GpuArray(std::move(resource), a.count_, a.format_);
+    return hr;
+}
+
+HRESULT Context::mul_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out) {
+    if (!backend_)
+        return E_POINTER;
+    if (!a || !b || a.count_ != b.count_ || a.format_ != b.format_)
+        return E_INVALIDARG;
+    const bool output_aliases_input =
+        out.resource_ && (out.resource_ == a.resource_ || out.resource_ == b.resource_);
+    if (!output_aliases_input)
+        out = GpuArray{}; // release its old arena slot for reuse
+    std::shared_ptr<void> resource;
+    HRESULT hr = backend_->mul_gpu(a.resource_, b.resource_, a.count_, resource);
+    if (SUCCEEDED(hr))
+        out = GpuArray(std::move(resource), a.count_, a.format_);
+    return hr;
+}
+
+HRESULT Context::readback_gpu(const GpuArray& array, void* out, std::size_t count) {
+    if (!backend_)
+        return E_POINTER;
+    if (!array || !out || count != array.count_)
+        return E_INVALIDARG;
+    return backend_->readback_gpu(array.resource_, out, count);
+}
+
+IBackend* Context::backend() noexcept {
     return backend_.get();
 }
 
-const IBackend* Context::backend() const noexcept
-{
+const IBackend* Context::backend() const noexcept {
     return backend_.get();
 }
 
-HRESULT get_native_d3d11(Context& context, NativeD3D11& native)
-{
-    auto* backend =
-        dynamic_cast<detail::D3D11Backend*>(context.backend());
+HRESULT get_native_d3d11(Context& context, NativeD3D11& native) {
+    auto* backend = dynamic_cast<detail::D3D11Backend*>(context.backend());
 
     if (!backend)
         return E_NOINTERFACE;
 
-    return backend->get_native(
-        &native.device,
-        &native.context);
+    return backend->get_native(&native.device, &native.context);
 }
 
 } // namespace dxblas

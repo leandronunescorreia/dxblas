@@ -18,14 +18,24 @@ option(dxBLAS_ENABLE_D3D11_DEBUG "Define D3D11 debug support for the library" OF
 add_library(dxblas
     src/dxblas.cpp
     src/d3d11_backend.cpp
+    src/backend/arena_texture.cpp
+    src/backend/arena_texture.hpp
     src/backend/d3d11_shader_manager.cpp
     src/backend/d3d11_shader_manager.hpp
     src/shaders/sum.hlsl
-    src/shaders/mul.hlsl)
+    src/shaders/mul.hlsl
+    src/shaders/gemm.hlsl
+    src/shaders/transpose.hlsl
+    src/shaders/add_vector.hlsl
+    src/shaders/gemm_transpose_bias.hlsl)
 
 set_source_files_properties(
     src/shaders/sum.hlsl
     src/shaders/mul.hlsl
+    src/shaders/gemm.hlsl
+    src/shaders/transpose.hlsl
+    src/shaders/add_vector.hlsl
+    src/shaders/gemm_transpose_bias.hlsl
     PROPERTIES HEADER_FILE_ONLY TRUE)
 
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
@@ -75,4 +85,72 @@ if(dxBLAS_BUILD_EXAMPLE)
         PRIVATE
             WIN32_LEAN_AND_MEAN
             NOMINMAX)
+
+    add_executable(dxblas_benchmark_2048
+        examples/benchmark_2048.cpp)
+
+    target_link_libraries(dxblas_benchmark_2048
+        PRIVATE dxblas)
+
+    target_compile_definitions(dxblas_benchmark_2048
+        PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX)
+
+    add_executable(dxblas_typed_operations
+        examples/typed_operations.cpp)
+
+    target_link_libraries(dxblas_typed_operations
+        PRIVATE dxblas)
+
+    target_compile_definitions(dxblas_typed_operations
+        PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX)
+
+    add_executable(dxblas_gpumem_roundtrip examples/gpumem_roundtrip.cpp)
+    target_link_libraries(dxblas_gpumem_roundtrip PRIVATE dxblas)
+    target_compile_definitions(dxblas_gpumem_roundtrip
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_gpumem_sum examples/gpumem_sum.cpp)
+    target_link_libraries(dxblas_gpumem_sum PRIVATE dxblas)
+    target_compile_definitions(dxblas_gpumem_sum
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_copy_tests examples/copy_tests.cpp)
+    target_link_libraries(dxblas_copy_tests PRIVATE dxblas)
+    target_compile_definitions(dxblas_copy_tests
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_copy_timing examples/copy_timing.cpp)
+    target_link_libraries(dxblas_copy_timing PRIVATE dxblas)
+    target_include_directories(dxblas_copy_timing PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(dxblas_copy_timing
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_upload_bench examples/upload_bench.cpp)
+    target_link_libraries(dxblas_upload_bench PRIVATE dxblas)
+    target_compile_definitions(dxblas_upload_bench
+        PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_gemm examples/dxblas_gemm.cpp)
+    target_link_libraries(dxblas_gemm PRIVATE dxblas)
+    target_compile_definitions(dxblas_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_matrix_multiply_4096 examples/matrix_multiply_4096.cpp)
+    target_link_libraries(dxblas_matrix_multiply_4096 PRIVATE dxblas)
+    target_compile_definitions(dxblas_matrix_multiply_4096 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_transpose_gemm examples/transpose_gemm.cpp)
+    target_link_libraries(dxblas_transpose_gemm PRIVATE dxblas)
+    target_compile_definitions(dxblas_transpose_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    # Also deploy editable HLSL beside the executable. Shader loading has an
+    # embedded fallback, so this is for development and runtime overrides.
+    add_custom_command(TARGET dxblas_gemm POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+            "$<TARGET_FILE_DIR:dxblas_gemm>/shaders"
+        VERBATIM)
 endif()

@@ -1,16 +1,33 @@
-// dxBLAS Compute Shader: Element-wise Multiplication
-// Computes output_buf[i] = input_a[i] * input_b[i]
-
+// dxBLAS D3D11 pixel shader. The shader manager specializes DTYPE and the
+// output signature at runtime by compiling concrete variants.
 #ifndef DTYPE
 #define DTYPE float
 #endif
 
-Buffer<DTYPE> input_a : register(t0);
-Buffer<DTYPE> input_b : register(t1);
-RWBuffer<DTYPE> output_buf : register(u0);
+Texture2D<DTYPE> input_a : register(t0);
+Texture2D<DTYPE> input_b : register(t1);
 
-[numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+struct PSInput
 {
-    output_buf[id.x] = input_a[id.x] * input_b[id.x];
+    float4 position : SV_Position;
+};
+
+#if defined(UNSIGNED_INTEGER_OUTPUT)
+uint main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    return input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
 }
+#elif defined(SIGNED_INTEGER_OUTPUT)
+int main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    return input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
+}
+#else
+DTYPE main(PSInput input) : SV_Target
+{
+    int2 pixel = int2(input.position.xy);
+    return input_a.Load(int3(pixel, 0)) * input_b.Load(int3(pixel, 0));
+}
+#endif

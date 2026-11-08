@@ -1,120 +1,52 @@
 #include <dxblas/dxblas.hpp>
 
-#include <cstdint>
 #include <iostream>
 #include <vector>
 
-static void print_hresult(const char* operation, HRESULT hr)
-{
-    if (FAILED(hr))
-        std::cerr << operation << " failed: 0x"
-                  << std::hex << static_cast<unsigned long>(hr)
-                  << std::dec << '\n';
+namespace {
+bool check(HRESULT hr, const char* operation) {
+    if (SUCCEEDED(hr))
+        return true;
+    std::cerr << operation << " failed (HRESULT 0x" << std::hex << static_cast<unsigned long>(hr)
+              << std::dec << ")\n";
+    return false;
 }
+} // namespace
 
-int main()
-{
-    // Native D3D11 flags: debug layer requested, automatically falls back if not installed.
-    dxblas::Context context(
-        D3D_DRIVER_TYPE_HARDWARE,
-        D3D11_CREATE_DEVICE_DEBUG);
-
-    HRESULT hr = context.initialize();
-    if (FAILED(hr)) {
-        print_hresult("initialize", hr);
+int main() {
+    dxblas::Context context;
+    if (!check(context.initialize(), "Context::initialize"))
         return 1;
-    }
 
-    std::vector<std::uint32_t> a{1, 2, 3, 4, 5};
-    std::vector<std::uint32_t> b{10, 20, 30, 40, 50};
-    std::vector<std::uint32_t> out(a.size());
+    const std::vector<float> cpu_a{1, 2, 3, 4, 5};
+    const std::vector<float> cpu_b{10, 20, 30, 40, 50};
+    dxblas::gpuMem<float> a(cpu_a), b(cpu_b), out(cpu_a.size());
 
-    // Native DirectX format.
-    hr = context.sum(
-        DXGI_FORMAT_R32_UINT,
-        a.data(),
-        b.data(),
-        out.data(),
-        out.size());
-
-    if (FAILED(hr)) {
-        print_hresult("sum", hr);
+    // Upload once. The following operations use the textures owned by gpuMem.
+    if (!check(context.copy(a, b, out, cpu_a.size()), "Context::copy"))
         return 2;
-    }
-
-    for (std::size_t i = 0; i < out.size(); ++i)
-        std::cout << a[i] << " + " << b[i]
-                  << " = " << out[i] << '\n';
-
-    // Element-wise multiplication
-    std::vector<std::uint32_t> mul_out(a.size());
-    hr = context.mul(
-        DXGI_FORMAT_R32_UINT,
-        a.data(),
-        b.data(),
-        mul_out.data(),
-        mul_out.size());
-
-    if (FAILED(hr)) {
-        print_hresult("mul (uint32)", hr);
+    if (!check(context.sum(a, b, out, cpu_a.size()), "Context::sum(gpuMem)"))
         return 3;
-    }
-
-    std::cout << "Uint32 mul:\n";
-    for (std::size_t i = 0; i < mul_out.size(); ++i)
-        std::cout << a[i] << " * " << b[i]
-                  << " = " << mul_out[i] << '\n';
-
-    // Verify float computation and shader caching
-    std::vector<float> fa{1.5f, 2.5f, 3.5f};
-    std::vector<float> fb{10.0f, 20.0f, 30.0f};
-    std::vector<float> fout(fa.size());
-
-    hr = context.sum(
-        DXGI_FORMAT_R32_FLOAT,
-        fa.data(),
-        fb.data(),
-        fout.data(),
-        fout.size());
-
-    if (FAILED(hr)) {
-        print_hresult("sum (float)", hr);
+    std::vector<float> result(cpu_a.size());
+    if (!check(context.copy_to_cpu(out, result.data(), result.size()), "copy_to_cpu"))
         return 4;
-    }
 
-    std::cout << "Float sum:\n";
-    for (std::size_t i = 0; i < fout.size(); ++i)
-        std::cout << fa[i] << " + " << fb[i]
-                  << " = " << fout[i] << '\n';
+    std::cout << "gpuMem sum: ";
+    for (float value : result)
+        std::cout << value << ' ';
+    std::cout << '\n';
 
-    std::vector<float> fmul_out(fa.size());
-    hr = context.mul(
-        DXGI_FORMAT_R32_FLOAT,
-        fa.data(),
-        fb.data(),
-        fmul_out.data(),
-        fmul_out.size());
-
-    if (FAILED(hr)) {
-        print_hresult("mul (float)", hr);
+    // Re-upload because copy() intentionally releases the CPU staging payload.
+    dxblas::gpuMem<float> ma(cpu_a), mb(cpu_b), mout(cpu_a.size());
+    if (!check(context.copy(ma, mb, mout, cpu_a.size()), "Context::copy for mul"))
         return 5;
-    }
-
-    std::cout << "Float mul:\n";
-    for (std::size_t i = 0; i < fmul_out.size(); ++i)
-        std::cout << fa[i] << " * " << fb[i]
-                  << " = " << fmul_out[i] << '\n';
-
-    dxblas::NativeD3D11 native{};
-    hr = dxblas::get_native_d3d11(context, native);
-    if (SUCCEEDED(hr)) {
-        // These are the actual native D3D11 objects.
-        std::cout << "ID3D11Device: " << native.device << '\n';
-        std::cout << "ID3D11DeviceContext: " << native.context << '\n';
-
-        native.context->Release();
-        native.device->Release();
-    }
-
+    if (!check(context.mul(ma, mb, mout, cpu_a.size()), "Context::mul(gpuMem)"))
+        return 6;
+    if (!check(context.copy_to_cpu(mout, result.data(), result.size()), "copy_to_cpu mul"))
+        return 7;
+    std::cout << "gpuMem mul: ";
+    for (float value : result)
+        std::cout << value << ' ';
+    std::cout << '\n';
     return 0;
 }

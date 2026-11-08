@@ -1,0 +1,24 @@
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+SortIncludes: Never
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+LineEnding: DeriveCRLF
+AlignEscapedNewlines: Left
+AttributeMacros: [_In_, _In_opt_, _In_z_, _In_opt_z_, _Out_, _Out_opt_, _Inout_, _Inout_opt_, _Use_decl_annotations_]
+
+# For exact preservation of other sensitive regions, wrap them with:
+# // clang-format off
+# ... code ...
+# // clang-format on

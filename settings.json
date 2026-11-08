@@ -1,0 +1,16 @@
+{
+    "$schema": "https://antigravity.google/schemas/v1/settings.json",
+    "permissions": {
+        "allow": [
+            "read_file(*)",
+            "command(git diff*)"
+        ],
+        "ask": [
+            "write_file(*)"
+        ],
+        "deny": [
+            "command(git commit*)",
+            "command(git push*)"
+        ]
+    }
+}

@@ -1,24 +1,209 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <initializer_list>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <d3d11.h>
 #include <dxgiformat.h>
 #include <windows.h>
 
 #include <dxblas/backend.hpp>
+#include <dxblas/gpu_mem.hpp>
 
 namespace dxblas {
 
+// Maps supported C++ element types to the corresponding single-channel DXGI
+// storage format. Unsupported types fail at compile time when used by a typed
+// Context operation.
+template <class T> struct dxgi_format;
+template <> struct dxgi_format<float> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R32_FLOAT;
+};
+template <> struct dxgi_format<std::uint8_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R8_UINT;
+};
+template <> struct dxgi_format<std::uint16_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R16_UINT;
+};
+template <> struct dxgi_format<std::uint32_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R32_UINT;
+};
+template <> struct dxgi_format<std::int8_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R8_SINT;
+};
+template <> struct dxgi_format<std::int16_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R16_SINT;
+};
+template <> struct dxgi_format<std::int32_t> {
+    static constexpr DXGI_FORMAT value = DXGI_FORMAT_R32_SINT;
+};
+template <class T> inline constexpr DXGI_FORMAT dxgi_format_v = dxgi_format<T>::value;
+
+// IEEE-754 binary16 storage type. Arithmetic/conversion helpers can be added
+// separately; this type deliberately preserves the 16-bit payload verbatim.
+struct float16 {
+    std::uint16_t bits = 0;
+    constexpr float16() noexcept = default;
+    explicit constexpr float16(std::uint16_t raw_bits) noexcept : bits(raw_bits) {
+    }
+};
+
+template <class T> struct gpu_mem_traits;
+template <> struct gpu_mem_traits<std::uint8_t> {
+    static constexpr DXGI_FORMAT format = DXGI_FORMAT_R8_UINT;
+};
+template <> struct gpu_mem_traits<std::int16_t> {
+    static constexpr DXGI_FORMAT format = DXGI_FORMAT_R16_SINT;
+};
+template <> struct gpu_mem_traits<std::int32_t> {
+    static constexpr DXGI_FORMAT format = DXGI_FORMAT_R32_SINT;
+};
+template <> struct gpu_mem_traits<float16> {
+    static constexpr DXGI_FORMAT format = DXGI_FORMAT_R16_FLOAT;
+};
+template <> struct gpu_mem_traits<float> {
+    static constexpr DXGI_FORMAT format = DXGI_FORMAT_R32_FLOAT;
+};
+
+// Non-owning upload descriptor for data that will be copied into the GPU texture
+// arena. The caller's pointer must remain valid until Context::copy returns. A
+// successful copy clears the pending pointer; to upload again, call assign(ptr, n)
+// and then copy. The GPU texture is reused when shape and format still match.
+template <class T> class gpuMem : public gpuMemBase {
+    static_assert(std::is_same_v<T, std::uint8_t> || std::is_same_v<T, std::int16_t> ||
+                      std::is_same_v<T, std::int32_t> || std::is_same_v<T, float16> ||
+                      std::is_same_v<T, float>,
+                  "gpuMem<T> supports uint8_t, int16_t, int32_t, dxblas::float16 and float");
+
+  public:
+    using value_type = T;
+
+    gpuMem() {
+        storage_format = gpu_mem_traits<T>::format;
+    }
+    explicit gpuMem(std::size_t element_count) {
+        count = element_count;
+        storage_format = gpu_mem_traits<T>::format;
+    }
+    gpuMem(const T* data, std::size_t element_count) {
+        storage_format = gpu_mem_traits<T>::format;
+        assign(data, element_count);
+    }
+    // Non-owning: the vector's storage must remain alive and stable until Context::copy uploads it.
+    explicit gpuMem(const std::vector<T>& data) {
+        storage_format = gpu_mem_traits<T>::format;
+        assign(data.data(), data.size());
+    }
+    gpuMem(std::vector<T>&&) = delete;
+
+    gpuMem(const gpuMem&) = delete;
+    gpuMem& operator=(const gpuMem&) = delete;
+
+    gpuMem(gpuMem&& other) noexcept {
+        move_from(std::move(other));
+    }
+
+    gpuMem& operator=(gpuMem&& other) noexcept {
+        if (this != &other)
+            move_from(std::move(other));
+        return *this;
+    }
+
+    // Retain only the caller's pointer; no CPU payload allocation or memcpy occurs here.
+    // The caller must keep [data, data + element_count) valid until the next upload operation.
+    void assign(const T* data, std::size_t element_count) {
+        if (element_count != 0 && data == nullptr)
+            throw std::invalid_argument("gpuMem data must not be null");
+        pending_data_ = element_count == 0 ? nullptr : data;
+        count = element_count;
+        storage_format = gpu_mem_traits<T>::format;
+    }
+
+    void assign(const std::vector<T>& data) {
+        assign(data.data(), data.size());
+    }
+    void assign(std::vector<T>&&) = delete;
+
+    std::size_t size() const noexcept {
+        return count;
+    }
+    bool empty() const noexcept {
+        return count == 0;
+    }
+    DXGI_FORMAT format() const noexcept {
+        return gpu_mem_traits<T>::format;
+    }
+    bool resident() const noexcept {
+        return texture.Get() != nullptr;
+    }
+    const T* data() const noexcept {
+        return pending_data_;
+    }
+    const void* cpu_data() const noexcept override {
+        return pending_data_;
+    }
+
+  private:
+    friend class Context;
+
+    void move_from(gpuMem&& other) noexcept {
+        texture = std::move(other.texture);
+        srv = std::move(other.srv);
+        rtv = std::move(other.rtv);
+        width = other.width;
+        height = other.height;
+        count = other.count;
+        storage_format = other.storage_format;
+        shape_is_user_defined = other.shape_is_user_defined;
+        pending_data_ = std::exchange(other.pending_data_, nullptr);
+
+        other.width = 0;
+        other.height = 0;
+        other.count = 0;
+        other.storage_format = DXGI_FORMAT_UNKNOWN;
+        other.shape_is_user_defined = false;
+    }
+
+    void release_pending_data() noexcept {
+        pending_data_ = nullptr;
+    }
+    const T* pending_data_ = nullptr;
+};
+// A reference-counted GPU-resident float array. Its texture storage is returned
+// to the context-owned texture arena when the last handle is released.
+class GpuArray {
+  public:
+    GpuArray() = default;
+    std::size_t size() const noexcept {
+        return count_;
+    }
+    DXGI_FORMAT format() const noexcept {
+        return format_;
+    }
+    explicit operator bool() const noexcept {
+        return static_cast<bool>(resource_);
+    }
+
+  private:
+    friend class Context;
+    GpuArray(std::shared_ptr<void> resource, std::size_t count, DXGI_FORMAT format)
+        : resource_(std::move(resource)), count_(count), format_(format) {
+    }
+    std::shared_ptr<void> resource_;
+    std::size_t count_ = 0;
+    DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
+};
+
 class Context {
-public:
-    Context(
-        D3D_DRIVER_TYPE driver_type = D3D_DRIVER_TYPE_HARDWARE,
-        UINT device_flags = 0);
-
+  public:
+    Context(D3D_DRIVER_TYPE driver_type = D3D_DRIVER_TYPE_HARDWARE, UINT device_flags = 0);
     explicit Context(std::unique_ptr<IBackend> backend);
-
     ~Context();
 
     Context(const Context&) = delete;
@@ -27,25 +212,237 @@ public:
     Context& operator=(Context&&) noexcept;
 
     HRESULT initialize();
+    // Runtime-format API for dynamically typed buffers.
+    HRESULT sum(DXGI_FORMAT format, const void* a, const void* b, void* out, std::size_t count);
+    HRESULT mul(DXGI_FORMAT format, const void* a, const void* b, void* out, std::size_t count);
 
-    HRESULT sum(
-        DXGI_FORMAT format,
-        const void* a,
-        const void* b,
-        void* out,
-        std::size_t count);
+    // Row-major single-precision matrix multiplication: C[M,N] = A[M,K] * B[K,N].
+    // This uses the D3D11 pixel-shader/render-to-texture path, not compute shaders.
+    HRESULT gemm(const float* a, const float* b, float* c, std::size_t m, std::size_t n,
+                 std::size_t k);
 
-    HRESULT mul(
-        DXGI_FORMAT format,
-        const void* a,
-        const void* b,
-        void* out,
-        std::size_t count);
+    // Row-major single-precision matrix transpose: out[cols, rows] = a[rows, cols]^T.
+    // This uses the D3D11 pixel-shader/render-to-texture path, not compute shaders.
+    HRESULT transpose(const float* a, float* out, std::size_t rows, std::size_t cols);
+
+    // Row-major single-precision matrix-vector addition: out[rows, cols] = matrix[rows, cols] +
+    // vector[cols]. Adds vector[cols] to each row of matrix[rows, cols].
+    HRESULT add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                       std::size_t cols);
+
+    // Fused FP32 GEMM + Transpose B + Bias Addition: out[M, N] = A[M, K] * B[N, K]^T + c[N].
+    // Evaluates in a single pixel shader pass directly into out.
+    HRESULT gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                std::size_t m, std::size_t n, std::size_t k);
+
+    // Typed convenience API. Type selection is per call, not per Context.
+    template <class T>
+    HRESULT sum(const std::vector<T>& a, const std::vector<T>& b, std::vector<T>& out) {
+        if (a.size() != b.size())
+            return E_INVALIDARG;
+        out.resize(a.size());
+        if (a.empty())
+            return S_OK;
+        return sum(dxgi_format_v<T>, a.data(), b.data(), out.data(), a.size());
+    }
+
+    template <class T>
+    HRESULT mul(const std::vector<T>& a, const std::vector<T>& b, std::vector<T>& out) {
+        if (a.size() != b.size())
+            return E_INVALIDARG;
+        out.resize(a.size());
+        if (a.empty())
+            return S_OK;
+        return mul(dxgi_format_v<T>, a.data(), b.data(), out.data(), a.size());
+    }
+
+    // GPU-resident path currently supports DXGI_FORMAT_R32_FLOAT.
+    HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count, GpuArray& out);
+    HRESULT sum_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out);
+    HRESULT mul_gpu(const GpuArray& a, const GpuArray& b, GpuArray& out);
+    HRESULT readback_gpu(const GpuArray& array, void* out, std::size_t count);
+
+    // ArenaTexture writes directly into each gpuMem resource; no intermediate
+    // separate texture wrapper or shared_ptr indirection is created.
+    template <class T> HRESULT copy(gpuMem<T>& a, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > a.size())
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!a.data())
+            return E_INVALIDARG;
+        HRESULT hr = backend_->copy_gpu_mem(a, element_count);
+        if (FAILED(hr))
+            return hr;
+        a.release_pending_data();
+        a.count = element_count;
+        return S_OK;
+    }
+
+    template <class T> HRESULT copy(gpuMem<T>& a) {
+        return copy(a, a.size());
+    }
+
+    template <class T>
+    HRESULT copy(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size())
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!a.data() || !b.data())
+            return E_INVALIDARG;
+        HRESULT hr = backend_->copy_gpu_mem(a, b, out, element_count);
+        if (FAILED(hr))
+            return hr;
+        a.release_pending_data();
+        b.release_pending_data();
+        out.release_pending_data();
+        a.count = b.count = out.count = element_count;
+        return S_OK;
+    }
+
+    template <class T>
+    HRESULT sum(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size())
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!a.resident() || !b.resident())
+            return E_INVALIDARG;
+        if constexpr (!std::is_same_v<T, float>)
+            return E_NOTIMPL;
+        else
+            return backend_->sum_gpu_mem(a, b, out, element_count);
+    }
+
+    template <class T>
+    HRESULT mul(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > a.size() || element_count > b.size() || element_count > out.size())
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!a.resident() || !b.resident())
+            return E_INVALIDARG;
+        if constexpr (!std::is_same_v<T, float>)
+            return E_NOTIMPL;
+        else
+            return backend_->mul_gpu_mem(a, b, out, element_count);
+    }
+
+    // GPU-resident row-major FP32 GEMM: C[M,N] = A[M,K] * B[K,N].
+    // Inputs and output must already be resident; no CPU upload occurs here.
+    HRESULT gemm(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& out, std::size_t m,
+                 std::size_t n, std::size_t k) {
+        if (!backend_)
+            return E_POINTER;
+        if (m == 0 || n == 0 || k == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (m > max_size / k || k > max_size / n || m > max_size / n)
+            return E_INVALIDARG;
+        if (a.size() < m * k || b.size() < k * n || out.size() < m * n)
+            return E_INVALIDARG;
+        if (!a.resident() || !b.resident())
+            return E_INVALIDARG;
+        return backend_->gemm_gpu_mem(a, b, out, m, n, k);
+    }
+
+    // GPU-resident row-major FP32 matrix transpose: out[cols, rows] = a[rows, cols]^T.
+    // Input must already be resident; no CPU upload occurs here.
+    HRESULT transpose(gpuMem<float>& a, gpuMem<float>& out, std::size_t rows, std::size_t cols) {
+        if (!backend_)
+            return E_POINTER;
+        if (rows == 0 || cols == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (rows > max_size / cols)
+            return E_INVALIDARG;
+        if (a.size() < rows * cols || out.size() < rows * cols)
+            return E_INVALIDARG;
+        if (!a.resident())
+            return E_INVALIDARG;
+        return backend_->transpose_gpu_mem(a, out, rows, cols);
+    }
+
+    // GPU-resident row-major FP32 matrix-vector addition: out[rows, cols] = matrix[rows, cols] +
+    // vector[cols]. Inputs must already be resident; no CPU upload occurs here.
+    HRESULT add_vector(gpuMem<float>& matrix, gpuMem<float>& vector, gpuMem<float>& out,
+                       std::size_t rows, std::size_t cols) {
+        if (!backend_)
+            return E_POINTER;
+        if (rows == 0 || cols == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (rows > max_size / cols)
+            return E_INVALIDARG;
+        if (matrix.size() < rows * cols || vector.size() < cols || out.size() < rows * cols)
+            return E_INVALIDARG;
+        if (!matrix.resident() || !vector.resident())
+            return E_INVALIDARG;
+        return backend_->add_vector_gpu_mem(matrix, vector, out, rows, cols);
+    }
+
+    // GPU-resident fused FP32 GEMM + Transpose B + Bias Addition: out[M, N] = A[M, K] * B[N, K]^T +
+    // c[N]. Evaluates in a single pixel shader pass directly into out without intermediate
+    // textures.
+    HRESULT gemm_transpose_bias(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& c,
+                                gpuMem<float>& out, std::size_t m, std::size_t n, std::size_t k) {
+        if (!backend_)
+            return E_POINTER;
+        if (m == 0 || n == 0 || k == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (m > max_size / k || n > max_size / k || m > max_size / n)
+            return E_INVALIDARG;
+        if (a.size() < m * k || b.size() < n * k || c.size() < n || out.size() < m * n)
+            return E_INVALIDARG;
+        if (!a.resident() || !b.resident() || !c.resident())
+            return E_INVALIDARG;
+        return backend_->gemm_transpose_bias_gpu_mem(a, b, c, out, m, n, k);
+    }
+
+    template <class T>
+    HRESULT copy_to_cpu(gpuMem<T>& source, T* destination, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > source.size() || (element_count != 0 && destination == nullptr))
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!source.resident())
+            return E_INVALIDARG;
+        return backend_->readback_gpu_mem(source, destination, element_count);
+    }
+
+    // Batch readback queues every GPU-to-staging copy before mapping any staging
+    // resource, reducing synchronization stalls when several buffers are downloaded.
+    HRESULT copy_to_cpu_batch(std::initializer_list<GpuMemReadbackRequest> requests) {
+        if (!backend_)
+            return E_POINTER;
+        for (const auto& request : requests) {
+            if (!request.source || request.count > request.source->count ||
+                (request.count != 0 && !request.destination))
+                return E_INVALIDARG;
+            if (request.count != 0 && !request.source->texture.Get())
+                return E_INVALIDARG;
+        }
+        if (requests.size() == 0)
+            return S_OK;
+        return backend_->readback_gpu_mem_batch(std::vector<GpuMemReadbackRequest>(requests));
+    }
 
     IBackend* backend() noexcept;
     const IBackend* backend() const noexcept;
 
-private:
+  private:
     std::unique_ptr<IBackend> backend_;
 };
 
@@ -54,8 +451,6 @@ struct NativeD3D11 {
     ID3D11DeviceContext* context = nullptr;
 };
 
-HRESULT get_native_d3d11(
-    Context& context,
-    NativeD3D11& native);
+HRESULT get_native_d3d11(Context& context, NativeD3D11& native);
 
 } // namespace dxblas
