@@ -14,6 +14,9 @@ enum class BinaryOp {
     Add,
     Mul,
     Gemm,
+    Transpose,
+    AddVector,
+    GemmTransposeBias,
 };
 
 struct ShaderKey {

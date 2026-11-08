@@ -32,7 +32,13 @@ class D3D11Backend final : public IBackend {
 
     HRESULT gemm(const float* a, const float* b, float* c, std::size_t m, std::size_t n,
                  std::size_t k) override;
+    HRESULT transpose(const float* a, float* out, std::size_t rows, std::size_t cols) override;
+    HRESULT add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                       std::size_t cols) override;
+    HRESULT gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                std::size_t m, std::size_t n, std::size_t k) override;
 
+    HRESULT copy_gpu_mem(gpuMemBase& a, std::size_t count) override;
     HRESULT copy_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT readback_gpu_mem(gpuMemBase& source, void* out, std::size_t count) override;
     HRESULT readback_gpu_mem_batch(const std::vector<GpuMemReadbackRequest>& requests) override;
@@ -40,6 +46,13 @@ class D3D11Backend final : public IBackend {
     HRESULT mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) override;
     HRESULT gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m,
                          std::size_t n, std::size_t k) override;
+    HRESULT transpose_gpu_mem(gpuMemBase& a, gpuMemBase& out, std::size_t rows,
+                              std::size_t cols) override;
+    HRESULT add_vector_gpu_mem(gpuMemBase& matrix, gpuMemBase& vector, gpuMemBase& out,
+                               std::size_t rows, std::size_t cols) override;
+    HRESULT gemm_transpose_bias_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& c,
+                                        gpuMemBase& out, std::size_t m, std::size_t n,
+                                        std::size_t k) override;
 
     HRESULT upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count,
                        std::shared_ptr<void>& out) override;

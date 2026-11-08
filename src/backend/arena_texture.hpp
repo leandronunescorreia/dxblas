@@ -87,6 +87,7 @@ class ArenaTexture final {
     HRESULT readback_float(ID3D11DeviceContext* context, const std::shared_ptr<gpuMemBase>& source,
                            void* destination, std::size_t count);
 
+    HRESULT copy_gpu_mem_buffer(ID3D11DeviceContext* context, gpuMemBase& a, std::size_t count);
     HRESULT copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a, gpuMemBase& b,
                                  gpuMemBase& out, std::size_t count);
     HRESULT upload_gpu_mem(ID3D11DeviceContext* context, gpuMemBase& memory, const void* data,

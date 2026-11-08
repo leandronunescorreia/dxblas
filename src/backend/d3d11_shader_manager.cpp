@@ -103,6 +103,108 @@ float main(PSInput input) : SV_Target
 }
 )";
 
+constexpr const char* kTransposePixelShaderSource = R"(
+#ifndef DTYPE
+#define DTYPE float
+#endif
+Texture2D<DTYPE> input_matrix : register(t0);
+cbuffer TransposeConstants : register(b0)
+{
+    uint Rows;
+    uint Cols;
+    uint InWidth;
+    uint OutWidth;
+};
+struct PSInput { float4 position : SV_Position; };
+#if defined(UNSIGNED_INTEGER_OUTPUT)
+uint main(PSInput input) : SV_Target
+#elif defined(SIGNED_INTEGER_OUTPUT)
+int main(PSInput input) : SV_Target
+#else
+DTYPE main(PSInput input) : SV_Target
+#endif
+{
+    const uint outputIndex = (uint)input.position.y * OutWidth + (uint)input.position.x;
+    if (outputIndex >= Rows * Cols) return (DTYPE)0;
+    const uint out_row = outputIndex / Rows;
+    const uint out_col = outputIndex - out_row * Rows;
+    const uint in_row = out_col;
+    const uint in_col = out_row;
+    const uint in_index = in_row * Cols + in_col;
+    const int2 in_pixel = int2((int)(in_index % InWidth), (int)(in_index / InWidth));
+    return input_matrix.Load(int3(in_pixel, 0));
+}
+)";
+
+constexpr const char* kAddVectorPixelShaderSource = R"(
+#ifndef DTYPE
+#define DTYPE float
+#endif
+Texture2D<DTYPE> input_matrix : register(t0);
+Texture2D<DTYPE> input_vector : register(t1);
+cbuffer AddVectorConstants : register(b0)
+{
+    uint Rows;
+    uint Cols;
+    uint MatWidth;
+    uint VecWidth;
+};
+struct PSInput { float4 position : SV_Position; };
+#if defined(UNSIGNED_INTEGER_OUTPUT)
+uint main(PSInput input) : SV_Target
+#elif defined(SIGNED_INTEGER_OUTPUT)
+int main(PSInput input) : SV_Target
+#else
+DTYPE main(PSInput input) : SV_Target
+#endif
+{
+    const uint outputIndex = (uint)input.position.y * MatWidth + (uint)input.position.x;
+    if (outputIndex >= Rows * Cols) return (DTYPE)0;
+    const uint row = outputIndex / Cols;
+    const uint col = outputIndex - row * Cols;
+    const int2 mat_pixel = int2((int)(outputIndex % MatWidth), (int)(outputIndex / MatWidth));
+    const int2 vec_pixel = int2((int)(col % VecWidth), (int)(col / VecWidth));
+    return input_matrix.Load(int3(mat_pixel, 0)) + input_vector.Load(int3(vec_pixel, 0));
+}
+)";
+
+constexpr const char* kGemmTransposeBiasPixelShaderSource = R"(
+Texture2D<float> matrix_a : register(t0);
+Texture2D<float> matrix_b : register(t1);
+Texture2D<float> vector_c : register(t2);
+cbuffer FusedGemmConstants : register(b0)
+{
+    uint M;
+    uint N;
+    uint K;
+    uint AWidth;
+    uint BWidth;
+    uint CWidth;
+    uint OutWidth;
+    uint Padding;
+};
+struct PSInput { float4 position : SV_Position; };
+float main(PSInput input) : SV_Target
+{
+    const uint outputIndex = (uint)input.position.y * OutWidth + (uint)input.position.x;
+    if (outputIndex >= M * N) return 0.0f;
+    const uint row = outputIndex / N;
+    const uint column = outputIndex - row * N;
+    float accumulator = 0.0f;
+    [loop]
+    for (uint inner = 0; inner < K; ++inner)
+    {
+        const uint aIndex = row * K + inner;
+        const uint bIndex = column * K + inner;
+        const float av = matrix_a.Load(int3((int)(aIndex % AWidth), (int)(aIndex / AWidth), 0));
+        const float bv = matrix_b.Load(int3((int)(bIndex % BWidth), (int)(bIndex / BWidth), 0));
+        accumulator += av * bv;
+    }
+    const float cv = vector_c.Load(int3((int)(column % CWidth), (int)(column / CWidth), 0));
+    return accumulator + cv;
+}
+)";
+
 const char* get_dtype_string(DXGI_FORMAT format) {
     switch (format) {
     case DXGI_FORMAT_R8_UINT:
@@ -140,6 +242,21 @@ std::string load_shader_source(BinaryOp op, const char*& source_name) {
         filename = "gemm.hlsl";
         source_name = "gemm.hlsl";
         fallback_source = kGemmPixelShaderSource;
+        break;
+    case BinaryOp::Transpose:
+        filename = "transpose.hlsl";
+        source_name = "transpose.hlsl";
+        fallback_source = kTransposePixelShaderSource;
+        break;
+    case BinaryOp::AddVector:
+        filename = "add_vector.hlsl";
+        source_name = "add_vector.hlsl";
+        fallback_source = kAddVectorPixelShaderSource;
+        break;
+    case BinaryOp::GemmTransposeBias:
+        filename = "gemm_transpose_bias.hlsl";
+        source_name = "gemm_transpose_bias.hlsl";
+        fallback_source = kGemmTransposeBiasPixelShaderSource;
         break;
     default:
         source_name = "unknown.hlsl";

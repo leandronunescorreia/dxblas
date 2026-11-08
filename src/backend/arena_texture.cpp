@@ -866,6 +866,12 @@ HRESULT ArenaTexture::readback_gpu_mem_batch(ID3D11DeviceContext* context,
 
     return S_OK;
 }
+HRESULT ArenaTexture::copy_gpu_mem_buffer(ID3D11DeviceContext* context, gpuMemBase& a,
+                                          std::size_t count) {
+    if (!context || !a.cpu_data() || count == 0)
+        return E_INVALIDARG;
+    return upload_gpu_mem(context, a, a.cpu_data(), count);
+}
 HRESULT ArenaTexture::copy_gpu_mem_buffers(ID3D11DeviceContext* context, gpuMemBase& a,
                                            gpuMemBase& b, gpuMemBase& out, std::size_t count) {
     if (!context || !a.cpu_data() || !b.cpu_data() || count == 0 ||

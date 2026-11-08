@@ -221,6 +221,20 @@ class Context {
     HRESULT gemm(const float* a, const float* b, float* c, std::size_t m, std::size_t n,
                  std::size_t k);
 
+    // Row-major single-precision matrix transpose: out[cols, rows] = a[rows, cols]^T.
+    // This uses the D3D11 pixel-shader/render-to-texture path, not compute shaders.
+    HRESULT transpose(const float* a, float* out, std::size_t rows, std::size_t cols);
+
+    // Row-major single-precision matrix-vector addition: out[rows, cols] = matrix[rows, cols] +
+    // vector[cols]. Adds vector[cols] to each row of matrix[rows, cols].
+    HRESULT add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                       std::size_t cols);
+
+    // Fused FP32 GEMM + Transpose B + Bias Addition: out[M, N] = A[M, K] * B[N, K]^T + c[N].
+    // Evaluates in a single pixel shader pass directly into out.
+    HRESULT gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                std::size_t m, std::size_t n, std::size_t k);
+
     // Typed convenience API. Type selection is per call, not per Context.
     template <class T>
     HRESULT sum(const std::vector<T>& a, const std::vector<T>& b, std::vector<T>& out) {
@@ -250,6 +264,27 @@ class Context {
 
     // ArenaTexture writes directly into each gpuMem resource; no intermediate
     // separate texture wrapper or shared_ptr indirection is created.
+    template <class T> HRESULT copy(gpuMem<T>& a, std::size_t element_count) {
+        if (!backend_)
+            return E_POINTER;
+        if (element_count > a.size())
+            return E_INVALIDARG;
+        if (element_count == 0)
+            return S_OK;
+        if (!a.data())
+            return E_INVALIDARG;
+        HRESULT hr = backend_->copy_gpu_mem(a, element_count);
+        if (FAILED(hr))
+            return hr;
+        a.release_pending_data();
+        a.count = element_count;
+        return S_OK;
+    }
+
+    template <class T> HRESULT copy(gpuMem<T>& a) {
+        return copy(a, a.size());
+    }
+
     template <class T>
     HRESULT copy(gpuMem<T>& a, gpuMem<T>& b, gpuMem<T>& out, std::size_t element_count) {
         if (!backend_)
@@ -315,9 +350,63 @@ class Context {
             return E_INVALIDARG;
         if (a.size() < m * k || b.size() < k * n || out.size() < m * n)
             return E_INVALIDARG;
-        if (!a.resident() || !b.resident() || !out.resident())
+        if (!a.resident() || !b.resident())
             return E_INVALIDARG;
         return backend_->gemm_gpu_mem(a, b, out, m, n, k);
+    }
+
+    // GPU-resident row-major FP32 matrix transpose: out[cols, rows] = a[rows, cols]^T.
+    // Input must already be resident; no CPU upload occurs here.
+    HRESULT transpose(gpuMem<float>& a, gpuMem<float>& out, std::size_t rows, std::size_t cols) {
+        if (!backend_)
+            return E_POINTER;
+        if (rows == 0 || cols == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (rows > max_size / cols)
+            return E_INVALIDARG;
+        if (a.size() < rows * cols || out.size() < rows * cols)
+            return E_INVALIDARG;
+        if (!a.resident())
+            return E_INVALIDARG;
+        return backend_->transpose_gpu_mem(a, out, rows, cols);
+    }
+
+    // GPU-resident row-major FP32 matrix-vector addition: out[rows, cols] = matrix[rows, cols] +
+    // vector[cols]. Inputs must already be resident; no CPU upload occurs here.
+    HRESULT add_vector(gpuMem<float>& matrix, gpuMem<float>& vector, gpuMem<float>& out,
+                       std::size_t rows, std::size_t cols) {
+        if (!backend_)
+            return E_POINTER;
+        if (rows == 0 || cols == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (rows > max_size / cols)
+            return E_INVALIDARG;
+        if (matrix.size() < rows * cols || vector.size() < cols || out.size() < rows * cols)
+            return E_INVALIDARG;
+        if (!matrix.resident() || !vector.resident())
+            return E_INVALIDARG;
+        return backend_->add_vector_gpu_mem(matrix, vector, out, rows, cols);
+    }
+
+    // GPU-resident fused FP32 GEMM + Transpose B + Bias Addition: out[M, N] = A[M, K] * B[N, K]^T +
+    // c[N]. Evaluates in a single pixel shader pass directly into out without intermediate
+    // textures.
+    HRESULT gemm_transpose_bias(gpuMem<float>& a, gpuMem<float>& b, gpuMem<float>& c,
+                                gpuMem<float>& out, std::size_t m, std::size_t n, std::size_t k) {
+        if (!backend_)
+            return E_POINTER;
+        if (m == 0 || n == 0 || k == 0)
+            return E_INVALIDARG;
+        const auto max_size = static_cast<std::size_t>(-1);
+        if (m > max_size / k || n > max_size / k || m > max_size / n)
+            return E_INVALIDARG;
+        if (a.size() < m * k || b.size() < n * k || c.size() < n || out.size() < m * n)
+            return E_INVALIDARG;
+        if (!a.resident() || !b.resident() || !c.resident())
+            return E_INVALIDARG;
+        return backend_->gemm_transpose_bias_gpu_mem(a, b, c, out, m, n, k);
     }
 
     template <class T>

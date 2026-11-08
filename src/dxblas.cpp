@@ -36,6 +36,20 @@ HRESULT Context::gemm(const float* a, const float* b, float* c, std::size_t m, s
     return backend_ ? backend_->gemm(a, b, c, m, n, k) : E_POINTER;
 }
 
+HRESULT Context::transpose(const float* a, float* out, std::size_t rows, std::size_t cols) {
+    return backend_ ? backend_->transpose(a, out, rows, cols) : E_POINTER;
+}
+
+HRESULT Context::add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                            std::size_t cols) {
+    return backend_ ? backend_->add_vector(matrix, vector, out, rows, cols) : E_POINTER;
+}
+
+HRESULT Context::gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                     std::size_t m, std::size_t n, std::size_t k) {
+    return backend_ ? backend_->gemm_transpose_bias(a, b, c, out, m, n, k) : E_POINTER;
+}
+
 HRESULT Context::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count,
                             GpuArray& out) {
     if (!backend_)

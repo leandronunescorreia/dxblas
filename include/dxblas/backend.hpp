@@ -26,8 +26,24 @@ class IBackend {
                          std::size_t) {
         return E_NOTIMPL;
     }
+    // Row-major FP32 matrix transpose: out[cols, rows] = a[rows, cols]^T.
+    virtual HRESULT transpose(const float*, float*, std::size_t, std::size_t) {
+        return E_NOTIMPL;
+    }
+    // Row-major FP32 matrix-vector addition: out[rows, cols] = matrix[rows, cols] + vector[cols].
+    virtual HRESULT add_vector(const float*, const float*, float*, std::size_t, std::size_t) {
+        return E_NOTIMPL;
+    }
+    // Fused FP32 GEMM + Transpose B + Bias Addition: Out[M, N] = A[M, K] * B[N, K]^T + c[N].
+    virtual HRESULT gemm_transpose_bias(const float*, const float*, const float*, float*,
+                                        std::size_t, std::size_t, std::size_t) {
+        return E_NOTIMPL;
+    }
 
     // Optional GPU-resident operations. Backends that do not implement them return E_NOTIMPL.
+    virtual HRESULT copy_gpu_mem(gpuMemBase&, std::size_t) {
+        return E_NOTIMPL;
+    }
     virtual HRESULT copy_gpu_mem(gpuMemBase&, gpuMemBase&, gpuMemBase&, std::size_t) {
         return E_NOTIMPL;
     }
@@ -45,6 +61,17 @@ class IBackend {
     }
     virtual HRESULT gemm_gpu_mem(gpuMemBase&, gpuMemBase&, gpuMemBase&, std::size_t, std::size_t,
                                  std::size_t) {
+        return E_NOTIMPL;
+    }
+    virtual HRESULT transpose_gpu_mem(gpuMemBase&, gpuMemBase&, std::size_t, std::size_t) {
+        return E_NOTIMPL;
+    }
+    virtual HRESULT add_vector_gpu_mem(gpuMemBase&, gpuMemBase&, gpuMemBase&, std::size_t,
+                                       std::size_t) {
+        return E_NOTIMPL;
+    }
+    virtual HRESULT gemm_transpose_bias_gpu_mem(gpuMemBase&, gpuMemBase&, gpuMemBase&, gpuMemBase&,
+                                                std::size_t, std::size_t, std::size_t) {
         return E_NOTIMPL;
     }
     virtual HRESULT upload_gpu(DXGI_FORMAT, const void*, std::size_t, std::shared_ptr<void>&) {

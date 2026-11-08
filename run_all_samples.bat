@@ -34,6 +34,7 @@ echo.
 rem Add or remove executable names here to match the samples built by CMake.
 for %%S in (
     dxblas_gemm.exe
+    dxblas_transpose_gemm.exe
     dxblas_matrix_multiply_4096.exe
     dxblas_typed_operations.exe
     dxblas_gpumem_roundtrip.exe

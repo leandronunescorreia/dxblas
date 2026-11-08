@@ -24,12 +24,18 @@ add_library(dxblas
     src/backend/d3d11_shader_manager.hpp
     src/shaders/sum.hlsl
     src/shaders/mul.hlsl
-    src/shaders/gemm.hlsl)
+    src/shaders/gemm.hlsl
+    src/shaders/transpose.hlsl
+    src/shaders/add_vector.hlsl
+    src/shaders/gemm_transpose_bias.hlsl)
 
 set_source_files_properties(
     src/shaders/sum.hlsl
     src/shaders/mul.hlsl
     src/shaders/gemm.hlsl
+    src/shaders/transpose.hlsl
+    src/shaders/add_vector.hlsl
+    src/shaders/gemm_transpose_bias.hlsl
     PROPERTIES HEADER_FILE_ONLY TRUE)
 
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
@@ -135,6 +141,10 @@ if(dxBLAS_BUILD_EXAMPLE)
     add_executable(dxblas_matrix_multiply_4096 examples/matrix_multiply_4096.cpp)
     target_link_libraries(dxblas_matrix_multiply_4096 PRIVATE dxblas)
     target_compile_definitions(dxblas_matrix_multiply_4096 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+    add_executable(dxblas_transpose_gemm examples/transpose_gemm.cpp)
+    target_link_libraries(dxblas_transpose_gemm PRIVATE dxblas)
+    target_compile_definitions(dxblas_transpose_gemm PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
     # Also deploy editable HLSL beside the executable. Shader loading has an
     # embedded fallback, so this is for development and runtime overrides.

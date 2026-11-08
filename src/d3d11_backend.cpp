@@ -21,6 +21,15 @@ class D3D11Backend::Impl {
     struct GemmConstants {
         UINT m, n, k, a_width, b_width, out_width, padding0, padding1;
     };
+    struct TransposeConstants {
+        UINT rows, cols, in_width, out_width;
+    };
+    struct AddVectorConstants {
+        UINT rows, cols, mat_width, vec_width;
+    };
+    struct FusedGemmConstants {
+        UINT m, n, k, a_width, b_width, c_width, out_width, padding;
+    };
 
     Impl(D3D_DRIVER_TYPE driver_type, UINT device_flags)
         : driver_type(driver_type), device_flags(device_flags) {
@@ -144,6 +153,10 @@ class D3D11Backend::Impl {
             offset += tile_count;
         }
         return S_OK;
+    }
+
+    HRESULT copy_gpu_mem(gpuMemBase& a, std::size_t count) {
+        return arena_texture.copy_gpu_mem_buffer(context.Get(), a, count);
     }
 
     HRESULT copy_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t count) {
@@ -317,6 +330,263 @@ class D3D11Backend::Impl {
         return S_OK;
     }
 
+    HRESULT update_transpose_constant_buffer(const TransposeConstants& constants) {
+        if (!transpose_constant_buffer) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(TransposeConstants);
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = device->CreateBuffer(&bd, nullptr, &transpose_constant_buffer);
+            if (FAILED(hr))
+                return hr;
+        }
+        context->UpdateSubresource(transpose_constant_buffer.Get(), 0, nullptr, &constants, 0, 0);
+        return S_OK;
+    }
+
+    HRESULT transpose_gpu_mem(gpuMemBase& a, gpuMemBase& out, std::size_t rows, std::size_t cols) {
+        if (!rows || !cols || a.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            out.storage_format != DXGI_FORMAT_R32_FLOAT || !a.texture.Get() || !a.srv.Get())
+            return E_INVALIDARG;
+        if (rows > static_cast<std::size_t>(-1) / cols || a.count < rows * cols)
+            return E_INVALIDARG;
+        if (rows > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            cols > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
+        if (out.texture.Get() && out.texture.Get() == a.texture.Get())
+            return E_INVALIDARG;
+
+        // Output matrix has cols rows and rows cols: width = rows, height = cols.
+        HRESULT hr = arena_texture.prepare_gpu_mem_matrix(
+            out, DXGI_FORMAT_R32_FLOAT, static_cast<UINT>(rows), static_cast<UINT>(cols));
+        if (FAILED(hr))
+            return hr;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        hr = compile_shaders(BinaryOp::Transpose, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const TransposeConstants constants{static_cast<UINT>(rows), static_cast<UINT>(cols),
+                                           a.width, out.width};
+        hr = update_transpose_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        ID3D11RenderTargetView* rtv = out.rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {a.srv.Get()};
+        context->PSSetShaderResources(0, 1, srvs);
+        ID3D11Buffer* cbs[] = {transpose_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+
+        constexpr UINT rows_per_draw = 64;
+        for (UINT start_row = 0; start_row < out.height; start_row += rows_per_draw) {
+            D3D11_VIEWPORT tile_vp{};
+            tile_vp.TopLeftY = static_cast<float>(start_row);
+            tile_vp.Width = static_cast<float>(out.width);
+            tile_vp.Height = static_cast<float>(std::min(rows_per_draw, out.height - start_row));
+            tile_vp.MinDepth = 0.0f;
+            tile_vp.MaxDepth = 1.0f;
+            context->RSSetViewports(1, &tile_vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr};
+        context->PSSetShaderResources(0, 1, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        out.count = rows * cols;
+        return S_OK;
+    }
+
+    HRESULT update_add_vector_constant_buffer(const AddVectorConstants& constants) {
+        if (!add_vector_constant_buffer) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(AddVectorConstants);
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = device->CreateBuffer(&bd, nullptr, &add_vector_constant_buffer);
+            if (FAILED(hr))
+                return hr;
+        }
+        context->UpdateSubresource(add_vector_constant_buffer.Get(), 0, nullptr, &constants, 0, 0);
+        return S_OK;
+    }
+
+    HRESULT add_vector_gpu_mem(gpuMemBase& matrix, gpuMemBase& vector, gpuMemBase& out,
+                               std::size_t rows, std::size_t cols) {
+        if (!rows || !cols || matrix.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            vector.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            out.storage_format != DXGI_FORMAT_R32_FLOAT || !matrix.texture.Get() ||
+            !matrix.srv.Get() || !vector.texture.Get() || !vector.srv.Get())
+            return E_INVALIDARG;
+        if (rows > static_cast<std::size_t>(-1) / cols || matrix.count < rows * cols ||
+            vector.count < cols)
+            return E_INVALIDARG;
+        if (rows > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            cols > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
+        if (out.texture.Get() && (out.texture.Get() == matrix.texture.Get() ||
+                                  out.texture.Get() == vector.texture.Get()))
+            return E_INVALIDARG;
+
+        HRESULT hr = arena_texture.prepare_gpu_mem_matrix(
+            out, DXGI_FORMAT_R32_FLOAT, static_cast<UINT>(cols), static_cast<UINT>(rows));
+        if (FAILED(hr))
+            return hr;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        hr = compile_shaders(BinaryOp::AddVector, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const AddVectorConstants constants{static_cast<UINT>(rows), static_cast<UINT>(cols),
+                                           matrix.width, vector.width};
+        hr = update_add_vector_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        ID3D11RenderTargetView* rtv = out.rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {matrix.srv.Get(), vector.srv.Get()};
+        context->PSSetShaderResources(0, 2, srvs);
+        ID3D11Buffer* cbs[] = {add_vector_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+
+        constexpr UINT rows_per_draw = 64;
+        for (UINT start_row = 0; start_row < out.height; start_row += rows_per_draw) {
+            D3D11_VIEWPORT tile_vp{};
+            tile_vp.TopLeftY = static_cast<float>(start_row);
+            tile_vp.Width = static_cast<float>(out.width);
+            tile_vp.Height = static_cast<float>(std::min(rows_per_draw, out.height - start_row));
+            tile_vp.MinDepth = 0.0f;
+            tile_vp.MaxDepth = 1.0f;
+            context->RSSetViewports(1, &tile_vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
+        context->PSSetShaderResources(0, 2, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        out.count = rows * cols;
+        return S_OK;
+    }
+
+    HRESULT update_fused_gemm_constant_buffer(const FusedGemmConstants& constants) {
+        if (!fused_gemm_constant_buffer) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(FusedGemmConstants);
+            bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            HRESULT hr = device->CreateBuffer(&bd, nullptr, &fused_gemm_constant_buffer);
+            if (FAILED(hr))
+                return hr;
+        }
+        context->UpdateSubresource(fused_gemm_constant_buffer.Get(), 0, nullptr, &constants, 0, 0);
+        return S_OK;
+    }
+
+    HRESULT gemm_transpose_bias_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& c,
+                                        gpuMemBase& out, std::size_t m, std::size_t n,
+                                        std::size_t k) {
+        if (!m || !n || !k || a.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            b.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            c.storage_format != DXGI_FORMAT_R32_FLOAT ||
+            out.storage_format != DXGI_FORMAT_R32_FLOAT || !a.texture.Get() || !a.srv.Get() ||
+            !b.texture.Get() || !b.srv.Get() || !c.texture.Get() || !c.srv.Get())
+            return E_INVALIDARG;
+        if (m > static_cast<std::size_t>(-1) / k || n > static_cast<std::size_t>(-1) / k ||
+            m > static_cast<std::size_t>(-1) / n || a.count < m * k || b.count < n * k ||
+            c.count < n)
+            return E_INVALIDARG;
+        if (m > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || n > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            k > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
+        if (out.texture.Get() &&
+            (out.texture.Get() == a.texture.Get() || out.texture.Get() == b.texture.Get() ||
+             out.texture.Get() == c.texture.Get()))
+            return E_INVALIDARG;
+
+        HRESULT hr = arena_texture.prepare_gpu_mem_matrix(
+            out, DXGI_FORMAT_R32_FLOAT, static_cast<UINT>(n), static_cast<UINT>(m));
+        if (FAILED(hr))
+            return hr;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        hr = compile_shaders(BinaryOp::GemmTransposeBias, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const FusedGemmConstants constants{static_cast<UINT>(m),
+                                           static_cast<UINT>(n),
+                                           static_cast<UINT>(k),
+                                           a.width,
+                                           b.width,
+                                           c.width,
+                                           out.width,
+                                           0};
+        hr = update_fused_gemm_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(out.width);
+        vp.Height = 1.0f;
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        ID3D11RenderTargetView* rtv = out.rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {a.srv.Get(), b.srv.Get(), c.srv.Get()};
+        context->PSSetShaderResources(0, 3, srvs);
+        ID3D11Buffer* cbs[] = {fused_gemm_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+
+        constexpr UINT rows_per_draw = 8;
+        for (UINT start_row = 0; start_row < out.height; start_row += rows_per_draw) {
+            D3D11_VIEWPORT tile_vp{};
+            tile_vp.TopLeftY = static_cast<float>(start_row);
+            tile_vp.Width = static_cast<float>(out.width);
+            tile_vp.Height = static_cast<float>(std::min(rows_per_draw, out.height - start_row));
+            tile_vp.MinDepth = 0.0f;
+            tile_vp.MaxDepth = 1.0f;
+            context->RSSetViewports(1, &tile_vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr};
+        context->PSSetShaderResources(0, 3, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        out.count = m * n;
+        return S_OK;
+    }
+
     HRESULT render_binary_gpu(ID3D11VertexShader* vs, ID3D11PixelShader* ps,
                               const std::shared_ptr<void>& a_handle,
                               const std::shared_ptr<void>& b_handle, std::size_t count,
@@ -448,6 +718,203 @@ class D3D11Backend::Impl {
         return binary_op(BinaryOp::Mul, format, a, b, out, count);
     }
 
+    HRESULT transpose(const float* a, float* out, std::size_t rows, std::size_t cols) {
+        if (!a || !out || !rows || !cols)
+            return E_INVALIDARG;
+        if (rows > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            cols > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            rows > static_cast<std::size_t>(-1) / cols)
+            return E_INVALIDARG;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        HRESULT hr = compile_shaders(BinaryOp::Transpose, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const UINT r = static_cast<UINT>(rows), c = static_cast<UINT>(cols);
+        std::shared_ptr<gpuMemBase> ma, mout;
+        hr = arena_texture.upload_matrix_float(context.Get(), a, c, r, ma);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.acquire_matrix_float(r, c, mout);
+        if (FAILED(hr))
+            return hr;
+
+        const TransposeConstants constants{r, c, c, r};
+        hr = update_transpose_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {ma->srv.Get()};
+        context->PSSetShaderResources(0, 1, srvs);
+        ID3D11Buffer* cbs[] = {transpose_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11RenderTargetView* rtv = mout->rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+
+        constexpr UINT rows_per_draw = 64;
+        for (UINT start = 0; start < c; start += rows_per_draw) {
+            const UINT batch = std::min(rows_per_draw, c - start);
+            D3D11_VIEWPORT vp{};
+            vp.TopLeftY = static_cast<float>(start);
+            vp.Width = static_cast<float>(r);
+            vp.Height = static_cast<float>(batch);
+            vp.MinDepth = 0;
+            vp.MaxDepth = 1;
+            context->RSSetViewports(1, &vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr};
+        context->PSSetShaderResources(0, 1, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        return arena_texture.readback_float(context.Get(), mout, out, rows * cols);
+    }
+
+    HRESULT add_vector(const float* matrix, const float* vector, float* out, std::size_t rows,
+                       std::size_t cols) {
+        if (!matrix || !vector || !out || !rows || !cols)
+            return E_INVALIDARG;
+        if (rows > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            cols > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            rows > static_cast<std::size_t>(-1) / cols)
+            return E_INVALIDARG;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        HRESULT hr = compile_shaders(BinaryOp::AddVector, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const UINT r = static_cast<UINT>(rows), c = static_cast<UINT>(cols);
+        std::shared_ptr<gpuMemBase> mm, mv, mout;
+        hr = arena_texture.upload_matrix_float(context.Get(), matrix, c, r, mm);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.upload_matrix_float(context.Get(), vector, c, 1, mv);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.acquire_matrix_float(c, r, mout);
+        if (FAILED(hr))
+            return hr;
+
+        const AddVectorConstants constants{r, c, c, c};
+        hr = update_add_vector_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {mm->srv.Get(), mv->srv.Get()};
+        context->PSSetShaderResources(0, 2, srvs);
+        ID3D11Buffer* cbs[] = {add_vector_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11RenderTargetView* rtv = mout->rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+
+        constexpr UINT rows_per_draw = 64;
+        for (UINT start = 0; start < r; start += rows_per_draw) {
+            const UINT batch = std::min(rows_per_draw, r - start);
+            D3D11_VIEWPORT vp{};
+            vp.TopLeftY = static_cast<float>(start);
+            vp.Width = static_cast<float>(c);
+            vp.Height = static_cast<float>(batch);
+            vp.MinDepth = 0;
+            vp.MaxDepth = 1;
+            context->RSSetViewports(1, &vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
+        context->PSSetShaderResources(0, 2, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        return arena_texture.readback_float(context.Get(), mout, out, rows * cols);
+    }
+
+    HRESULT gemm_transpose_bias(const float* a, const float* b, const float* c, float* out,
+                                std::size_t m, std::size_t n, std::size_t k) {
+        if (!a || !b || !c || !out || !m || !n || !k)
+            return E_INVALIDARG;
+        if (m > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || n > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            k > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            return E_INVALIDARG;
+
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader> ps;
+        HRESULT hr = compile_shaders(BinaryOp::GemmTransposeBias, DXGI_FORMAT_R32_FLOAT, vs, ps);
+        if (FAILED(hr))
+            return hr;
+
+        const UINT rows = static_cast<UINT>(m), cols = static_cast<UINT>(n),
+                   inner = static_cast<UINT>(k);
+        std::shared_ptr<gpuMemBase> ma, mb, mc, mout;
+        hr = arena_texture.upload_matrix_float(context.Get(), a, inner, rows, ma);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.upload_matrix_float(context.Get(), b, inner, cols, mb);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.upload_matrix_float(context.Get(), c, cols, 1, mc);
+        if (FAILED(hr))
+            return hr;
+        hr = arena_texture.acquire_matrix_float(cols, rows, mout);
+        if (FAILED(hr))
+            return hr;
+
+        const FusedGemmConstants constants{rows, cols, inner, inner, inner, cols, cols, 0};
+        hr = update_fused_gemm_constant_buffer(constants);
+        if (FAILED(hr))
+            return hr;
+
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[] = {ma->srv.Get(), mb->srv.Get(), mc->srv.Get()};
+        context->PSSetShaderResources(0, 3, srvs);
+        ID3D11Buffer* cbs[] = {fused_gemm_constant_buffer.Get()};
+        context->PSSetConstantBuffers(0, 1, cbs);
+        ID3D11RenderTargetView* rtv = mout->rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+
+        constexpr UINT rows_per_draw = 8;
+        for (UINT start = 0; start < rows; start += rows_per_draw) {
+            const UINT batch = std::min(rows_per_draw, rows - start);
+            D3D11_VIEWPORT vp{};
+            vp.TopLeftY = static_cast<float>(start);
+            vp.Width = static_cast<float>(cols);
+            vp.Height = static_cast<float>(batch);
+            vp.MinDepth = 0;
+            vp.MaxDepth = 1;
+            context->RSSetViewports(1, &vp);
+            context->Draw(3, 0);
+        }
+
+        ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr, nullptr};
+        context->PSSetShaderResources(0, 3, null_srvs);
+        ID3D11Buffer* null_cbs[] = {nullptr};
+        context->PSSetConstantBuffers(0, 1, null_cbs);
+        context->PSSetShader(nullptr, nullptr, 0);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        return arena_texture.readback_float(context.Get(), mout, out, m * n);
+    }
+
     D3D_DRIVER_TYPE driver_type;
     UINT device_flags;
     D3D_FEATURE_LEVEL feature_level{};
@@ -455,6 +922,9 @@ class D3D11Backend::Impl {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11Buffer> gemm_constant_buffer;
+    ComPtr<ID3D11Buffer> transpose_constant_buffer;
+    ComPtr<ID3D11Buffer> add_vector_constant_buffer;
+    ComPtr<ID3D11Buffer> fused_gemm_constant_buffer;
     D3D11ShaderManager shader_manager;
     ArenaTexture arena_texture;
 };
@@ -486,6 +956,24 @@ HRESULT D3D11Backend::gemm(const float* a, const float* b, float* c, std::size_t
     return impl_->gemm(a, b, c, m, n, k);
 }
 
+HRESULT D3D11Backend::transpose(const float* a, float* out, std::size_t rows, std::size_t cols) {
+    return impl_->transpose(a, out, rows, cols);
+}
+
+HRESULT D3D11Backend::add_vector(const float* matrix, const float* vector, float* out,
+                                 std::size_t rows, std::size_t cols) {
+    return impl_->add_vector(matrix, vector, out, rows, cols);
+}
+
+HRESULT D3D11Backend::gemm_transpose_bias(const float* a, const float* b, const float* c,
+                                          float* out, std::size_t m, std::size_t n, std::size_t k) {
+    return impl_->gemm_transpose_bias(a, b, c, out, m, n, k);
+}
+
+HRESULT D3D11Backend::copy_gpu_mem(gpuMemBase& a, std::size_t count) {
+    return impl_->copy_gpu_mem(a, count);
+}
+
 HRESULT D3D11Backend::copy_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out,
                                    std::size_t count) {
     return impl_->copy_gpu_mem(a, b, out, count);
@@ -510,6 +998,19 @@ HRESULT D3D11Backend::mul_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out,
 HRESULT D3D11Backend::gemm_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& out, std::size_t m,
                                    std::size_t n, std::size_t k) {
     return impl_->gemm_gpu_mem(a, b, out, m, n, k);
+}
+HRESULT D3D11Backend::transpose_gpu_mem(gpuMemBase& a, gpuMemBase& out, std::size_t rows,
+                                        std::size_t cols) {
+    return impl_->transpose_gpu_mem(a, out, rows, cols);
+}
+HRESULT D3D11Backend::add_vector_gpu_mem(gpuMemBase& matrix, gpuMemBase& vector, gpuMemBase& out,
+                                         std::size_t rows, std::size_t cols) {
+    return impl_->add_vector_gpu_mem(matrix, vector, out, rows, cols);
+}
+HRESULT D3D11Backend::gemm_transpose_bias_gpu_mem(gpuMemBase& a, gpuMemBase& b, gpuMemBase& c,
+                                                  gpuMemBase& out, std::size_t m, std::size_t n,
+                                                  std::size_t k) {
+    return impl_->gemm_transpose_bias_gpu_mem(a, b, c, out, m, n, k);
 }
 
 HRESULT D3D11Backend::upload_gpu(DXGI_FORMAT format, const void* data, std::size_t count,
